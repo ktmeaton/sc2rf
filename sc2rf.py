@@ -702,6 +702,7 @@ def show_matches(examples, samples, writer):
                 output += " "
             if is_missing(coord, sa['missings']):
                 output += colored('N', 'white', attrs=['reverse'])
+                continue
             else:
                 if sa['subs_dict'].get(coord):  # sample has sub here
                     matching_exs = []
