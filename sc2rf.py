@@ -109,7 +109,8 @@ def main():
     parser.add_argument('--update-readme', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--hide-progress', action='store_true', help="Don't show progress bars during long task.")
     parser.add_argument('--csvfile', type=argparse.FileType('w'), help="Path to write results in CSV format.")
-    
+    parser.add_argument('--ignore-shared-subs', action='store_true', help="Ignore substitutions that are shared between all parents.")
+
     global args
     args = parser.parse_args()
 
@@ -624,6 +625,22 @@ def show_matches(examples, samples, writer):
         for sub in ex['subs_list']:
             coords.add(sub.coordinate)
 
+    if args.ignore_shared_subs:
+        filter_coords = set()
+        for coord in coords:
+            parents_matches = 0
+            for ex in examples:
+                # Store of list of substitutions coords for this example
+                ex_coords = [sub.coordinate for sub in ex["subs_list"]]
+                # check if the coord matches this parent
+                if coord in ex_coords:
+                    parents_matches += 1
+
+            # check if this coord was not found in all parents
+            if parents_matches < len(examples):
+                filter_coords.add(coord)
+        coords = filter_coords
+
     if args.show_private_mutations:
         # append mutations unique to sample genomes
         for sa in samples:
@@ -741,7 +758,11 @@ def show_matches(examples, samples, writer):
                         # more than one, but not all examples match - can't provide proper color
                         #bg = 'on_blue'
                         attrs = ['bold', 'underline']
-                    # else: all examples match
+
+                    else:
+                        # all examples match
+                        if args.ignore_shared_subs:
+                            continue
 
                     output += colored(text, fg, bg, attrs=attrs)
 
