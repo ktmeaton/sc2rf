@@ -719,7 +719,21 @@ def show_matches(examples, samples, writer):
                 output += " "
             if is_missing(coord, sa['missings']):
                 output += colored('N', 'white', attrs=['reverse'])
-                continue
+                # Option 1, ignore
+                #continue
+
+                # Option 2, treat as breakpoint
+                if prev_definitive_match:
+                    breakpoints += 1
+                    regions.append((start_coord, last_coord, prev_definitive_match))
+                    start_coord = coord  # start of a new region
+
+                if definitives_since_breakpoint:
+                    definitives_count.append((prev_definitive_match, definitives_since_breakpoint))
+
+                prev_definitive_match = matching_exs[0]
+                definitives_since_breakpoint = 0
+
             else:
                 if sa['subs_dict'].get(coord):  # sample has sub here
                     matching_exs = []
