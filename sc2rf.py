@@ -715,14 +715,16 @@ def show_matches(examples, samples, writer):
 
         output += fixed_len(sa['name'], ml) + ' '
         for c, coord in enumerate(ordered_coords):
+
             if args.add_spaces and c % args.add_spaces == 0:
                 output += " "
             if is_missing(coord, sa['missings']):
                 output += colored('N', 'white', attrs=['reverse'])
+
                 # Option 1, ignore
                 #continue
 
-                # Option 2, treat as breakpoint
+                # Option 2, treat as breakpoint, requires post-filtering
                 if prev_definitive_match:
                     breakpoints += 1
                     regions.append((start_coord, last_coord, prev_definitive_match))
@@ -731,8 +733,10 @@ def show_matches(examples, samples, writer):
                 if definitives_since_breakpoint:
                     definitives_count.append((prev_definitive_match, definitives_since_breakpoint))
 
-                prev_definitive_match = matching_exs[0]
-                definitives_since_breakpoint = 0
+                # Have we found any matching examples so far?
+                if len(matching_exs) > 0:
+                    prev_definitive_match = matching_exs[0]
+                    definitives_since_breakpoint = 0
 
             else:
                 if sa['subs_dict'].get(coord):  # sample has sub here
