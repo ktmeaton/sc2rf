@@ -716,6 +716,8 @@ def show_matches(examples, samples, writer):
         output += fixed_len(sa['name'], ml) + ' '
         for c, coord in enumerate(ordered_coords):
 
+            matching_exs = []            
+
             if args.add_spaces and c % args.add_spaces == 0:
                 output += " "
             if is_missing(coord, sa['missings']):
@@ -740,7 +742,6 @@ def show_matches(examples, samples, writer):
 
             else:
                 if sa['subs_dict'].get(coord):  # sample has sub here
-                    matching_exs = []
                     for ex in examples:
                         if ex['subs_dict'].get(coord) and ex['subs_dict'].get(coord).mut == sa['subs_dict'][coord].mut:
                             matching_exs.append(ex['name'])
