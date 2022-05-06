@@ -634,6 +634,18 @@ def show_matches(examples, samples, writer):
         for sub in ex['subs_list']:
             coords.add(sub.coordinate)
 
+    private_coords = set()
+    if args.show_private_mutations:
+        # append mutations unique to sample genomes
+        for sa in samples:
+            for sub in sa['subs_list']:
+                # Check if this is a private mutation
+                if sub.coordinate not in coords:
+                    private_coords.add(sub.coordinate)
+
+        # Add in the private mutations
+        coords = coords.union(private_coords)
+
     if args.ignore_shared_subs:
         filter_coords = set()
         for coord in coords:
@@ -650,11 +662,6 @@ def show_matches(examples, samples, writer):
                 filter_coords.add(coord)
         coords = filter_coords
 
-    if args.show_private_mutations:
-        # append mutations unique to sample genomes
-        for sa in samples:
-            for sub in sa['subs_list']:
-                coords.add(sub.coordinate)
 
     if args.primers:
         for name, primer_set in primer_sets.items():
@@ -691,6 +698,9 @@ def show_matches(examples, samples, writer):
 
     ordered_coords = list(coords)
     ordered_coords.sort()
+
+    ordered_privates = list(private_coords)
+    ordered_privates.sort()
     
     color_by_name = dict()
     color_index = 0
@@ -729,13 +739,11 @@ def show_matches(examples, samples, writer):
 
             if args.add_spaces and c % args.add_spaces == 0:
                 output += " "
+
             if is_missing(coord, sa['missings']):
                 output += colored('N', 'white', attrs=['reverse'])
 
-                # Option 1, ignore
-                #continue
-
-                # Option 2, treat as breakpoint, requires post-filtering
+                # Treat as breakpoint, Note: requires post-filtering!
                 if prev_definitive_match:
                     breakpoints += 1
                     regions.append((start_coord, last_coord, prev_definitive_match))
@@ -750,6 +758,7 @@ def show_matches(examples, samples, writer):
                     definitives_since_breakpoint = 0
 
             else:
+                # -------------------------------------------------------------
                 if sa['subs_dict'].get(coord):  # sample has sub here
                     for ex in examples:
                         if ex['subs_dict'].get(coord) and ex['subs_dict'].get(coord).mut == sa['subs_dict'][coord].mut:
@@ -793,6 +802,10 @@ def show_matches(examples, samples, writer):
                         # none of the examples match - private mutation
                         bg = 'on_cyan'
                         privates.append(sa['subs_dict'].get(coord))
+                        # Output the base, then skip to the next record
+                        # ie. don't save the current coords as a last coord for breakpoints
+                        output += colored(text, fg, bg, attrs=attrs)
+                        continue
 
                     elif len(matching_exs) == 1:
                         # exactly one of the examples match - definite match
@@ -823,6 +836,7 @@ def show_matches(examples, samples, writer):
 
                     output += colored(text, fg, bg, attrs=attrs)
 
+                # -------------------------------------------------------------
                 else:  # sample does not have sub here
                     matching_exs = []
                     for ex in examples:
@@ -859,11 +873,18 @@ def show_matches(examples, samples, writer):
                         # more than one, but not all examples match - can't provide proper color
                         #bg = 'on_yellow'
                         attrs = ['underline']
-                    # else: all examples match (which should not happen, because some example must have a mutation here)
+                    else: 
+                        #all examples match (which means this is a private mutation in another sample)
+                        # Output the base, then skip to the next record
+                        # ie. don't save the current coords as a last coord for breakpoints
+                        output += colored(text, fg, bg, attrs=attrs)
+                        continue
                     
                     output += colored(text, fg, bg, attrs=attrs)
 
             last_coord = coord  # save current coord before iterating to next
+
+        # Finish iterating through all coords for a sample
 
         # output last region
         regions.append((start_coord, last_coord, prev_definitive_match))
