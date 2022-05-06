@@ -540,6 +540,10 @@ def read_subs_from_fasta(path):
     for name, fasta in my_tqdm(fastas.items(), desc="Finding mutations in " + path):
         subs_dict = dict()  # substitutions keyed by position
         missings = list()  # start/end tuples of N's or gaps
+        missings_matches = ["N"]
+        if not args.enable_deletions:
+            missings_matches.append("-")
+
         if len(fasta) != len(reference):
             print(f"Sequence {name} not properly aligned, length is {len(fasta)} instead of {len(reference)}.")
         else:
@@ -547,15 +551,20 @@ def read_subs_from_fasta(path):
             for i in range(1, len(reference) + 1):
                 r = reference[i - 1]
                 s = fasta[i - 1]
-                if s == 'N' or s == '-':
+
+                if s in missings_matches:
                     if start_n == -1:
                         start_n = i  # mark the start of possible run of N's
                 elif start_n >= 0:
                     # we've been tracking a run of N's, this base marks the end
                     missings.append((start_n, i-1))  # Python-style (closed, open) interval
                     start_n = -1
+
+                # If we're at the end of the genome and it was missing
+                if i == len(reference) and s in missings_matches:
+                    missings.append((start_n, i-1))
                     
-                if s != 'N' and s != '-' and r != s:
+                if r !=s and s not in missings_matches:
                     subs_dict[i] = Sub(r, i, s)  # nucleotide substitution
 
                 if not s in "AGTCN-":
@@ -716,7 +725,7 @@ def show_matches(examples, samples, writer):
         output += fixed_len(sa['name'], ml) + ' '
         for c, coord in enumerate(ordered_coords):
 
-            matching_exs = []            
+            matching_exs = []
 
             if args.add_spaces and c % args.add_spaces == 0:
                 output += " "
