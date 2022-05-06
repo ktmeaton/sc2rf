@@ -760,7 +760,36 @@ def show_matches(examples, samples, writer):
                     bg = None
                     attrs = ['bold']
 
-                    if len(matching_exs) == 0:
+                    # If this is a terminal deletion, recode to N
+                    if text == "-":
+                        # Assume terminal deletion by default
+                        prev_terminal_deletion = True
+
+                        # Have all previous coords been a deletion?
+                        for c_i, coord_i in enumerate(ordered_coords):
+                            if coord_i == coord: break
+                            if coord_i not in sa['subs_dict']: continue
+                            text_i = sa['subs_dict'][coord_i].mut
+                            if text_i != "-":
+                                prev_terminal_deletion = False
+
+                        # Are all proceeding coords are a deletion?
+                        proc_terminal_deletion = True
+                        for c_i, coord_i in enumerate(ordered_coords):
+                            if coord_i <= coord: continue
+                            if coord_i not in sa['subs_dict']: continue
+                            text_i = sa['subs_dict'][coord_i].mut
+                            if text_i != "-":
+                                proc_terminal_deletion = False
+
+                        if prev_terminal_deletion or proc_terminal_deletion:
+                            text = "N"
+
+                    if text == "N":
+                        fg = "white"
+                        attrs = ["reverse"]
+
+                    elif len(matching_exs) == 0:
                         # none of the examples match - private mutation
                         bg = 'on_cyan'
                         privates.append(sa['subs_dict'].get(coord))
