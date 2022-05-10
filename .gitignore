@@ -12,3 +12,6 @@ sc2rf.egg-info
 # files that lena did not clean up yet
 test.ansi
 test.csv
+
+# files that katherine did not clean up yet
+primers.bed
