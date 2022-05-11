@@ -277,7 +277,7 @@ def rebuild_examples():
                 continue
 
             print(f"Fetching data for {query}")
-            url = f'https://lapis.cov-spectrum.org/gisaid/v1/sample/nuc-mutations{query}&minProportion=0.05'
+            url = f'https://lapis.cov-spectrum.org/open/v1/sample/nuc-mutations{query}&minProportion=0.05'
             print(f"Url is {url}")
             r = requests.get(url)
             result = r.json()
@@ -727,8 +727,13 @@ def show_matches(examples, samples, writer):
         definitives_count = []
         regions = []  # for CSV output
         privates = []
-        start_coord = ordered_coords[0]
         last_coord = None
+
+        if len(ordered_coords) == 0:
+            continue
+        else:
+            start_coord = ordered_coords[0]
+
 
         output = ''
 
