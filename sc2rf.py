@@ -271,7 +271,7 @@ def rebuild_examples():
             elif pango and len(pango) > 0:
                 query = f"?pangoLineage={pango}*"
             elif clade and len(clade) > 0:
-                query = f"?nextstrainClade={clade}+({who_label})"
+                query = f"?nextstrainClade={clade}%20({who_label})"
             else:
                 print("Variant has neither pango nor clade, check out mapping.csv!")
                 continue
