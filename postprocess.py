@@ -10,6 +10,7 @@ NO_DATA_CHAR = "NA"
 @click.command()
 @click.option("--csv", help="CSV output from sc2rf.", required=True)
 @click.option("--ansi", help="ANSI output from sc2rf.", required=False)
+@click.option("--prefix", help="Prefix for output files.", required=False, default="sc2rf.recombinants")
 @click.option("--min-len", help="Minimum region length.", required=False, default=1000)
 @click.option(
     "--max-parents", help="Maximum number of parents.", required=False, default=2
@@ -39,6 +40,7 @@ NO_DATA_CHAR = "NA"
 def main(
     csv,
     ansi,
+    prefix,
     min_len,
     outdir,
     aligned,
@@ -289,7 +291,7 @@ def main(
         df.at[rec[0], "sc2rf_num_breakpoints_filter"] = num_breakpoints
 
     # write exclude strains
-    outpath_exclude = os.path.join(outdir, "sc2rf.recombinants.exclude.tsv")
+    outpath_exclude = os.path.join(outdir, prefix + ".exclude.tsv")
     if len(drop_strains) > 0:
         with open(outpath_exclude, "w") as outfile:
             for strain, reason in drop_strains.items():
@@ -335,12 +337,12 @@ def main(
         axis="columns",
         inplace=True,
     )
-    outpath_rec = os.path.join(outdir, "sc2rf.recombinants.tsv")
+    outpath_rec = os.path.join(outdir, prefix + ".tsv")
     df.to_csv(outpath_rec, sep="\t", index=False)
 
     # -------------------------------------------------------------------------
     # write output strains
-    outpath_strains = os.path.join(outdir, "sc2rf.recombinants.txt")
+    outpath_strains = os.path.join(outdir, prefix + ".txt")
     strains = list(df.index)
     strains_txt = "\n".join(strains)
     with open(outpath_strains, "w") as outfile:
@@ -349,7 +351,7 @@ def main(
     # -------------------------------------------------------------------------
     # filter the ansi output
     if ansi:
-        outpath_ansi = os.path.join(outdir, "sc2rf.recombinants.ansi.txt")
+        outpath_ansi = os.path.join(outdir, prefix + ".ansi.txt")
         if len(drop_strains) > 0:
             cmd = "cut -f 1 {exclude} | grep -v -f - {inpath} > {outpath}".format(
                 exclude=outpath_exclude,
@@ -366,7 +368,7 @@ def main(
     # -------------------------------------------------------------------------
     # write alignment
     if aligned:
-        outpath_fasta = os.path.join(outdir, "sc2rf.recombinants.fasta")
+        outpath_fasta = os.path.join(outdir, prefix + ".fasta")
 
         # first extract the reference genome
         cmd = "seqkit grep -p '{custom_ref}' {aligned} > {outpath_fasta};".format(
