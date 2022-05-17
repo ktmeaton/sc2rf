@@ -37,6 +37,9 @@ NO_DATA_CHAR = "NA"
 @click.option(
     "--issues", help="Issues TSV metadata from pango-designation (https://github.com/ktmeaton/ncov-recombinant/raw/master/resources/issues.tsv)", required=False
 )
+@click.option(
+    "--false-positives", help="False positives (TSV) of parents and breakpoints", required=False
+)
 def main(
     csv,
     ansi,
@@ -49,6 +52,7 @@ def main(
     issues,
     qc,
     max_breakpoints,
+    false_positives,
 ):
     """Detect recombinant seqences from sc2rf. Dependencies: pandas, click"""
 
@@ -83,6 +87,9 @@ def main(
 
         # Consider a breakpoint match if within 50 base pairs
         breakpoint_approx_bp = 50
+
+    if false_positives:
+        false_positives_df = pd.read_csv(false_positives, sep="\t")
 
     # Initialize a dictionary of strains to drop with
     # key: strain, value: reason
@@ -185,6 +192,7 @@ def main(
         # Except! If the breakpoints were initially 0
         num_breakpoints = df["breakpoints"][rec[0]]
         num_breakpoints_filter = len(breakpoints_filter)
+        breakpoints_filter_csv = ",".join(breakpoints_filter)
 
         if (num_breakpoints > 0) and (num_breakpoints_filter > num_breakpoints):
             drop_strains[
@@ -202,6 +210,7 @@ def main(
 
         # Identify the new filtered clades
         clades_filter = [regions_filter[s]["clade"] for s in regions_filter]
+        clades_filter_csv = ",".join(clades_filter)
         num_parents = len(set(clades_filter))
         if num_parents > max_parents:
             drop_strains[rec[0]] = "{} parents > {}".format(num_parents, max_parents)
@@ -282,13 +291,25 @@ def main(
                 collapse_lineages_filter = [NO_DATA_CHAR]
 
             sc2rf_lineage = ",".join(collapse_lineages_filter)
-            df.at[rec[0], "lineage"] = sc2rf_lineage
+            df.at[rec[0], "sc2rf_lineage"] = sc2rf_lineage
+
+        # check for false-posisitives, to override lineage call
+        if false_positives:
+
+            for false_parents, false_bp in zip(
+                false_positives_df["parents"],
+                false_positives_df["breakpoints"],
+                ):
+                if (
+                    false_parents == clades_filter_csv
+                    and false_bp == breakpoints_filter_csv):
+                    df.at[rec[0], "sc2rf_lineage"] = "false_positive"
 
         df.at[rec[0], "sc2rf_clades_filter"] = ",".join(clades_filter)
         df.at[rec[0], "sc2rf_regions_filter"] = ",".join(regions_filter)
         df.at[rec[0], "sc2rf_regions_length"] = ",".join(regions_length)
         df.at[rec[0], "sc2rf_breakpoints_filter"] = ",".join(breakpoints_filter)
-        df.at[rec[0], "sc2rf_num_breakpoints_filter"] = num_breakpoints
+        df.at[rec[0], "sc2rf_num_breakpoints_filter"] = num_breakpoints_filter
 
     # write exclude strains
     outpath_exclude = os.path.join(outdir, prefix + ".exclude.tsv")
