@@ -9,6 +9,8 @@ import argparse
 import os
 import requests
 from tqdm import tqdm
+import urllib.parse
+
 
 colors = ['red', 'green', 'blue', 'yellow', 'magenta', 'cyan']
 
@@ -32,7 +34,9 @@ genes = {
     '': (29534, 99999), # probably nothing, but need something to mark the end of N
 }
 
+
 class Interval:
+    """ An interval of integers, e.g., 27, 27-, -30 or 27-30 """
     def __init__(self, string):
         # TODO allow multiple separators, see https://stackoverflow.com/questions/1059559/split-strings-into-words-with-multiple-word-boundary-delimiters
         self.original_string = string
@@ -47,6 +51,7 @@ class Interval:
             raise ValueError('invalid interval: ' + string)
 
     def matches(self, num):
+        """ check if num is within closed interval """
         if self.min and num < self.min:
             return False
         if self.max and num > self.max:
@@ -59,6 +64,7 @@ class Interval:
 
 
 def main():
+    """ Command line interface """
     global mappings
     global width_override
     global dot_character
@@ -83,7 +89,7 @@ def main():
     parser.add_argument('--primer-intervals', nargs='*',  metavar='INTERVAL', type=Interval, help='Coordinate intervals in which to visualize primers.')
     parser.add_argument('--parents', '-p', default='2-4', metavar='INTERVAL', type=Interval, help='Allowed number of potential parents of a recombinant.')
     parser.add_argument('--breakpoints', '-b', default='1-4', metavar='INTERVAL', type=Interval, help='Allowed number of breakpoints in a recombinant.')
-    parser.add_argument('--clades', '-c', nargs='*', default=['20I','20H','20J', '21I', '21J', 'BA.1', 'BA.2', 'BA.3'], help='List of variants which are considered as potential parents. Use Nextstrain clades (like "21B"), or Pango Lineages (like "B.1.617.1") or both. Also accepts "all".')
+    parser.add_argument('--clades', '-c', nargs='*', default=['20I', '20H', '20J', '21I', '21J', 'BA.1', 'BA.2', 'BA.3'], help='List of variants which are considered as potential parents. Use Nextstrain clades (like "21B"), or Pango Lineages (like "B.1.617.1") or both. Also accepts "all".')
     parser.add_argument('--unique', '-u', default=2, type=int,  metavar='NUM', help='Minimum of substitutions in a sample which are unique to a potential parent clade, so that the clade will be considered.')
     parser.add_argument('--max-intermission-length', '-l', metavar='NUM', default=2, type=int, help='The maximum length of an intermission in consecutive substitutions. Intermissions are stretches to be ignored when counting breakpoints.')
     parser.add_argument('--max-intermission-count', '-i', metavar='NUM', default=8, type=int, help='The maximum number of intermissions which will be ignored. Surplus intermissions count towards the number of breakpoints.')
@@ -102,7 +108,9 @@ def main():
     parser.add_argument('--ansi', action='store_true', help='Use only ASCII characters to be compatible with ansilove.')
     parser.add_argument('--update-readme', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--hide-progress', action='store_true', help="Don't show progress bars during long task.")
-    
+    parser.add_argument('--csvfile', type=argparse.FileType('w'), help="Path to write results in CSV format.")
+    parser.add_argument('--ignore-shared-subs', action='store_true', help="Ignore substitutions that are shared between all parents.")
+
     global args
     args = parser.parse_args()
 
@@ -136,6 +144,7 @@ def main():
     if 'all' in args.clades:
         used_examples = all_examples
     else:
+        # screen for a subset of examples only
         for example in all_examples:
             if len(example['NextstrainClade']) and example['NextstrainClade'] in args.clades:
                 used_examples.append(example)
@@ -151,7 +160,7 @@ def main():
     for path in args.input:
         read_samples = read_subs_from_fasta(path)
         for key, val in read_samples.items():
-            all_samples[key] = val
+            all_samples[key] = val  # deep copy
     vprint("Done.")
 
     global primer_sets
@@ -165,9 +174,10 @@ def main():
 
     calculate_relations(used_examples)
 
+    # lists of samples keyed by tuples of example indices
     match_sets = dict()
 
-    vprint("Scanning input for matches against linege definitons...")
+    vprint("Scanning input for matches against lineage definitons...")
     for sa_name, sa in my_tqdm(all_samples.items(), desc="First pass scan"):
         matching_example_indices = []
         if args.force_all_parents:
@@ -175,7 +185,9 @@ def main():
         else:    
             for i, ex in enumerate(used_examples):
                 matches_count = len(sa['subs_set'] & ex['unique_subs_set'])
-                if matches_count >= args.unique: # theoretically > 0 already gives us recombinants, but they are much more likely to be errors or coincidences
+                # theoretically > 0 already gives us recombinants, but they are much
+                # more likely to be errors or coincidences
+                if matches_count >= args.unique:
                     matching_example_indices.append(i) 
 
         matching_examples_tup = tuple(matching_example_indices)
@@ -187,16 +199,25 @@ def main():
             else:
                 match_sets[matching_examples_tup] = [sa]
 
-    vprint("Done.\nPriniting detailed analysis:\n\n")
+    vprint("Done.\nPrinting detailed analysis:\n\n")
 
     if len(match_sets):
+        writer = None
+        if args.csvfile:
+            fieldnames = ['sample', 'examples', 'intermissions', 'breakpoints', 'regions']
+            if args.show_private_mutations: fieldnames.append('privates')
+            writer = csv.DictWriter(args.csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+
         for matching_example_indices, samples in match_sets.items():
-            show_matches([used_examples[i] for i in matching_example_indices], samples)
+            show_matches([used_examples[i] for i in matching_example_indices], samples, writer=writer)
     else:
         print("First pass found no potential recombinants, see ")
 
+
 def my_tqdm(*margs, **kwargs):
     return tqdm(*margs, delay=0.1, colour="green", disable=bool(args.hide_progress), **kwargs)
+
 
 def update_readme(parser: argparse.ArgumentParser):
     # on wide monitors, github displays up to 90 columns of preformatted text
@@ -245,16 +266,20 @@ def rebuild_examples():
             clade = variant_props['NextstrainClade']
             who_label = variant_props['WhoLabel']
             query = ""
-            if pango and len(pango) > 0:
+            if variant_props['Query']:
+                query = f"?variantQuery={urllib.parse.quote_plus(variant_props['Query'])}"
+            elif pango and len(pango) > 0:
                 query = f"?pangoLineage={pango}*"
             elif clade and len(clade) > 0:
-                query = f"?nextstrainClade={clade}+({who_label})"
+                query = f"?nextstrainClade={clade}%20({who_label})"
             else:
                 print("Variant has neither pango nor clade, check out mapping.csv!")
                 continue
 
             print(f"Fetching data for {query}")
-            r = requests.get(f'https://lapis.cov-spectrum.org/open/v1/sample/nuc-mutations{query}&minProportion=0.05')
+            url = f'https://lapis.cov-spectrum.org/open/v1/sample/nuc-mutations{query}&minProportion=0.05'
+            print(f"Url is {url}")
+            r = requests.get(url)
             result = r.json()
             if len(result['errors']):
                 print("Errors occured while querying cov-spectrum.org:")
@@ -278,6 +303,7 @@ def rebuild_examples():
 
         json.dump(props, jsonfile, indent=4)
         print("Examples written to disk.")
+
 
 def read_examples(path):
     with open(path, newline='') as jsonfile:
@@ -309,6 +335,7 @@ def read_examples(path):
 
         return examples
 
+
 class Primer(NamedTuple):
     start: int
     end: int
@@ -316,6 +343,7 @@ class Primer(NamedTuple):
     alt: bool
     name: str
     sequence: str
+
 
 class Amplicon:
     left_primers: list
@@ -464,10 +492,15 @@ def read_bed(path):
 
                 amplicon.add_primer(primer)
 
-
     return pools
 
+
 def read_fasta(path, index_range):
+    """
+    :param path:  str, absolute or relative path to FASTA file
+    :param index_range:  Interval, select specific records from FASTA
+    :return:  dict, sequences keyed by header
+    """
     sequences = dict()
     index = 0
     current_name = None
@@ -479,11 +512,11 @@ def read_fasta(path, index_range):
             for line in fasta:
                 file_pos += len(line)
                 pbar.update(file_pos - pbar.n)
-                if(line[0] == '>'):
+                if line[0] == '>':
                     if current_name and (not index_range or index_range.matches(index)):
                         sequences[current_name] = current_sequence
                     index += 1
-                    if index_range and index > index_range.max:
+                    if index_range and index_range.max and index > index_range.max:
                         return sequences
                     current_sequence = ''
                     current_name = line[1:].strip()
@@ -493,14 +526,24 @@ def read_fasta(path, index_range):
 
     return sequences
 
+
 def read_subs_from_fasta(path):
+    """
+    Extract substitutions relative to reference genome.
+    :param path:  str, path to input FASTA file
+    :return:  dict, substitutions (as dict, list or set) keyed by genome name
+    """
     fastas = read_fasta(path, args.select_sequences)
     sequences = dict()
-    start_n = -1
+    start_n = -1  # used for tracking runs of Ns or gaps
     removed_due_to_ambig = 0
     for name, fasta in my_tqdm(fastas.items(), desc="Finding mutations in " + path):
-        subs_dict = dict()
-        missings = list()
+        subs_dict = dict()  # substitutions keyed by position
+        missings = list()  # start/end tuples of N's or gaps
+        missings_matches = ["N"]
+        if not args.enable_deletions:
+            missings_matches.append("-")
+
         if len(fasta) != len(reference):
             print(f"Sequence {name} not properly aligned, length is {len(fasta)} instead of {len(reference)}.")
         else:
@@ -508,22 +551,28 @@ def read_subs_from_fasta(path):
             for i in range(1, len(reference) + 1):
                 r = reference[i - 1]
                 s = fasta[i - 1]
-                if s == 'N' or s == '-':
+
+                if s in missings_matches:
                     if start_n == -1:
-                        start_n = i
+                        start_n = i  # mark the start of possible run of N's
                 elif start_n >= 0:
-                    missings.append((start_n, i - 1))
+                    # we've been tracking a run of N's, this base marks the end
+                    missings.append((start_n, i-1))  # Python-style (closed, open) interval
                     start_n = -1
+
+                # If we're at the end of the genome and it was missing
+                if i == len(reference) and s in missings_matches:
+                    missings.append((start_n, i-1))
                     
-                if s != 'N' and s != '-' and r != s:
-                    subs_dict[i] = Sub(r, i, s)
+                if r !=s and s not in missings_matches:
+                    subs_dict[i] = Sub(r, i, s)  # nucleotide substitution
 
                 if not s in "AGTCN-":
-                    ambiguous_count += 1
+                    ambiguous_count += 1  # count mixtures
 
             if ambiguous_count <= args.max_ambiguous:
                 sequences[name] = {
-                    'name': name,
+                    'name': name,  # isn't this redundant?
                     'subs_dict': subs_dict,
                     'subs_list': list(subs_dict.values()),
                     'subs_set': set(subs_dict.values()),
@@ -537,17 +586,20 @@ def read_subs_from_fasta(path):
 
     return sequences
 
+
 class Sub(NamedTuple):
     ref: str
     coordinate: int
     mut: str
 
+
 def parse_sub(s):
-    if(s[0].isdigit()):
+    if s[0].isdigit():
         coordinate = int(s[0:-1])
         return Sub(reference[coordinate-1], coordinate, s[-1])
     else:
         return Sub(s[0], int(s[1:-1]), s[-1])
+
 
 def prunt(s, color=None):
     if color:
@@ -555,25 +607,61 @@ def prunt(s, color=None):
     else:
         print(s, end="")
 
+
 def fixed_len(s, l):
     trunc = s[0:l]
     return trunc.ljust(l)
 
-def show_matches(examples, samples):
+
+def show_matches(examples, samples, writer):
+    """
+    Display results to screen
+    :param examples:  list, dict for every variant reference genome with keys:
+                      ['name', 'NextstrainClade', 'PangoLineage', 'subs_dict',
+                      'subs_list', 'subs_set', 'missings', 'unique_subs_set']
+    :param samples:  list, dict for every query genome, same structure as above
+    :param writer:  csv.DictWriter, optional (defaults to None)
+    """
     ml = args.max_name_length
+    examples_str = ','.join([ex['name'] for ex in examples])
 
     if args.sort_by_id:
         samples.sort(key = lambda sample: sample['name'][:args.sort_by_id])
 
+    # set union of mutations in all example genomes
     coords = set()
     for ex in examples:
         for sub in ex['subs_list']:
             coords.add(sub.coordinate)
 
+    private_coords = set()
     if args.show_private_mutations:
+        # append mutations unique to sample genomes
         for sa in samples:
             for sub in sa['subs_list']:
-                coords.add(sub.coordinate)
+                # Check if this is a private mutation
+                if sub.coordinate not in coords:
+                    private_coords.add(sub.coordinate)
+
+        # Add in the private mutations
+        coords = coords.union(private_coords)
+
+    if args.ignore_shared_subs:
+        filter_coords = set()
+        for coord in coords:
+            parents_matches = 0
+            for ex in examples:
+                # Store of list of substitutions coords for this example
+                ex_coords = [sub.coordinate for sub in ex["subs_list"]]
+                # check if the coord matches this parent
+                if coord in ex_coords:
+                    parents_matches += 1
+
+            # check if this coord was not found in all parents
+            if parents_matches < len(examples):
+                filter_coords.add(coord)
+        coords = filter_coords
+
 
     if args.primers:
         for name, primer_set in primer_sets.items():
@@ -610,6 +698,9 @@ def show_matches(examples, samples):
 
     ordered_coords = list(coords)
     ordered_coords.sort()
+
+    ordered_privates = list(private_coords)
+    ordered_privates.sort()
     
     color_by_name = dict()
     color_index = 0
@@ -617,14 +708,13 @@ def show_matches(examples, samples):
         color_by_name[ex['name']] = get_color(color_index)
         color_index += 1
 
-    # This method works in a weird way: it pre-constructs the lines for the actual sequences, 
+    # This method works in a weird way: it pre-constructs the lines for the actual sequences,
     # and while it constructs the strings, it decides if they are worth showing at the same time.
     # Then, if at least one such string was collected, it prints the header lines for them, and after that the strings.
 
     ###### SHOW SAMPLES
     current_color = 'grey'
     collected_outputs = []
-
     last_id = ""
 
     for sa in my_tqdm(samples, desc=f"Second pass scan for {[ex['name'] for ex in examples]}"):
@@ -635,18 +725,46 @@ def show_matches(examples, samples):
         breakpoints = 0
         definitives_since_breakpoint = 0
         definitives_count = []
+        regions = []  # for CSV output
+        privates = []
+        last_coord = None
+
+        if len(ordered_coords) == 0:
+            continue
+        else:
+            start_coord = ordered_coords[0]
+
 
         output = ''
 
         output += fixed_len(sa['name'], ml) + ' '
         for c, coord in enumerate(ordered_coords):
+
+            matching_exs = []
+
             if args.add_spaces and c % args.add_spaces == 0:
                 output += " "
+
             if is_missing(coord, sa['missings']):
                 output += colored('N', 'white', attrs=['reverse'])
+
+                # Treat as breakpoint, Note: requires post-filtering!
+                if prev_definitive_match:
+                    breakpoints += 1
+                    regions.append((start_coord, last_coord, prev_definitive_match))
+                    start_coord = coord  # start of a new region
+
+                if definitives_since_breakpoint:
+                    definitives_count.append((prev_definitive_match, definitives_since_breakpoint))
+
+                # Have we found any matching examples so far?
+                if len(matching_exs) > 0:
+                    prev_definitive_match = matching_exs[0]
+                    definitives_since_breakpoint = 0
+
             else:
-                if(sa['subs_dict'].get(coord)): # sample has sub here
-                    matching_exs = []
+                # -------------------------------------------------------------
+                if sa['subs_dict'].get(coord):  # sample has sub here
                     for ex in examples:
                         if ex['subs_dict'].get(coord) and ex['subs_dict'].get(coord).mut == sa['subs_dict'][coord].mut:
                             matching_exs.append(ex['name'])
@@ -654,27 +772,77 @@ def show_matches(examples, samples):
                     text = sa['subs_dict'][coord].mut
                     fg = 'white'
                     bg = None
-                    attrs=['bold']
+                    attrs = ['bold']
 
-                    if(len(matching_exs) == 0): # none of the examples match - private mutation
+                    # If this is a terminal deletion, recode to N
+                    if text == "-":
+                        # Assume terminal deletion by default
+                        prev_terminal_deletion = True
+
+                        # Have all previous coords been a deletion?
+                        for c_i, coord_i in enumerate(ordered_coords):
+                            if coord_i == coord: break
+                            if coord_i not in sa['subs_dict']: continue
+                            text_i = sa['subs_dict'][coord_i].mut
+                            if text_i != "-":
+                                prev_terminal_deletion = False
+
+                        # Are all proceeding coords are a deletion?
+                        proc_terminal_deletion = True
+                        for c_i, coord_i in enumerate(ordered_coords):
+                            if coord_i <= coord: continue
+                            if coord_i not in sa['subs_dict']: continue
+                            text_i = sa['subs_dict'][coord_i].mut
+                            if text_i != "-":
+                                proc_terminal_deletion = False
+
+                        if prev_terminal_deletion or proc_terminal_deletion:
+                            text = "N"
+
+                    if text == "N":
+                        fg = "white"
+                        attrs = ["reverse"]
+
+                    elif len(matching_exs) == 0:
+                        # none of the examples match - private mutation
                         bg = 'on_cyan'
-                    elif(len(matching_exs) == 1): # exactly one of the examples match - definite match
+                        privates.append(sa['subs_dict'].get(coord))
+                        # Output the base, then skip to the next record
+                        # ie. don't save the current coords as a last coord for breakpoints
+                        output += colored(text, fg, bg, attrs=attrs)
+                        continue
+
+                    elif len(matching_exs) == 1:
+                        # exactly one of the examples match - definite match
                         fg = color_by_name[matching_exs[0]]
                         if matching_exs[0] != prev_definitive_match:
                             if prev_definitive_match:
                                 breakpoints += 1
+                                regions.append((start_coord, last_coord, prev_definitive_match))
+                                start_coord = coord  # start of a new region
+
                             if definitives_since_breakpoint:
-                                definitives_count.append((prev_definitive_match,definitives_since_breakpoint))
+                                definitives_count.append((prev_definitive_match, definitives_since_breakpoint))
+
                             prev_definitive_match = matching_exs[0]
                             definitives_since_breakpoint = 0
+
                         definitives_since_breakpoint += 1
-                    elif(len(matching_exs) < len(examples)): # more than one, but not all examples match - can't provide proper color
-                         #bg = 'on_blue'
-                         attrs = ['bold', 'underline']
-                    # else: all examples match
+
+                    elif len(matching_exs) < len(examples):
+                        # more than one, but not all examples match - can't provide proper color
+                        #bg = 'on_blue'
+                        attrs = ['bold', 'underline']
+
+                    else:
+                        # all examples match
+                        if args.ignore_shared_subs:
+                            continue
 
                     output += colored(text, fg, bg, attrs=attrs)
-                else: # sample does not have sub here
+
+                # -------------------------------------------------------------
+                else:  # sample does not have sub here
                     matching_exs = []
                     for ex in examples:
                         if not ex['subs_dict'].get(coord):
@@ -685,26 +853,49 @@ def show_matches(examples, samples):
                     bg = None
                     attrs = []
 
-                    if(len(matching_exs) == 0):  # none of the examples match - private reverse mutation
+                    if len(matching_exs) == 0:
+                        # none of the examples match - private reverse mutation
                         bg = 'on_magenta'
-                    elif(len(matching_exs) == 1): # exactly one of the examples match - definite match
+
+                    elif len(matching_exs) == 1:
+                        # exactly one of the examples match - definite match
                         fg = color_by_name[matching_exs[0]]
                         if matching_exs[0] != prev_definitive_match:
                             if prev_definitive_match:
                                 breakpoints += 1
+                                regions.append((start_coord, last_coord, prev_definitive_match))
+                                start_coord = coord  # start of a new region
+
                             if definitives_since_breakpoint:
-                                definitives_count.append((prev_definitive_match,definitives_since_breakpoint))
+                                definitives_count.append((prev_definitive_match, definitives_since_breakpoint))
+
                             prev_definitive_match = matching_exs[0]
                             definitives_since_breakpoint = 0
+
                         definitives_since_breakpoint += 1
-                    elif(len(matching_exs) < len(examples)): # more than one, but not all examples match - can't provide proper color
-                         #bg = 'on_yellow'
-                         attrs = ['underline']
-                    # else: all examples match (which should not happen, because some example must have a mutation here)
+
+                    elif len(matching_exs) < len(examples):
+                        # more than one, but not all examples match - can't provide proper color
+                        #bg = 'on_yellow'
+                        attrs = ['underline']
+                    else: 
+                        #all examples match (which means this is a private mutation in another sample)
+                        # Output the base, then skip to the next record
+                        # ie. don't save the current coords as a last coord for breakpoints
+                        output += colored(text, fg, bg, attrs=attrs)
+                        continue
                     
                     output += colored(text, fg, bg, attrs=attrs)
+
+            last_coord = coord  # save current coord before iterating to next
+
+        # Finish iterating through all coords for a sample
+
+        # output last region
+        regions.append((start_coord, last_coord, prev_definitive_match))
+
         if definitives_since_breakpoint:
-            definitives_count.append((prev_definitive_match,definitives_since_breakpoint))
+            definitives_count.append((prev_definitive_match, definitives_since_breakpoint))
 
         # now transform definitive streaks: every sequence like ..., X, S, Y, ... where S is a small numer into ..., (X+Y), ...
 
@@ -742,7 +933,18 @@ def show_matches(examples, samples):
 
             last_id = sa['name']
             collected_outputs.append(output)
-    
+            if writer:
+                row = {
+                    'sample': last_id,
+                    'examples': examples_str.replace(' ', ''),
+                    'intermissions': num_intermissions,
+                    'breakpoints': num_breakpoints,
+                    'regions': ','.join([f"{start}:{stop}|{ex.replace(' ', '')}" for start, stop, ex in regions])
+                }
+                if args.show_private_mutations:
+                    row.update({'privates': ','.join([f"{ps.ref}{ps.coordinate}{ps.mut}" for ps in privates])})
+                writer.writerow(row)
+
     if len(collected_outputs) == 0:
         print(f"\n\nSecond pass scan found no potential recombinants between {[ex['name'] for ex in examples]}.\n")
     else:
@@ -930,7 +1132,11 @@ def is_missing(coordinate, missings):
             return True
     return False
 
+
 def calculate_relations(examples):
+    """
+
+    """
     for example in examples:
         union = set()
         for other in examples:
@@ -944,6 +1150,7 @@ def calculate_relations(examples):
         if unique_count < 3:
             color = "red"
         vprint(colored(f"Clade  {example['name']} has {len(example['subs_set'])} mutations, of which {unique_count} are unique.", color))
+
 
 class ArgumentAdvancedDefaultsHelpFormatter(argparse.HelpFormatter):
     """In contrast to ArgumentDefaultsHelpFormatter from argparse,
