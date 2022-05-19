@@ -10,6 +10,7 @@ NO_DATA_CHAR = "NA"
 @click.command()
 @click.option("--csv", help="CSV output from sc2rf.", required=True)
 @click.option("--ansi", help="ANSI output from sc2rf.", required=False)
+@click.option("--motifs", help="TSV of breakpoint motifs", required=False)
 @click.option("--prefix", help="Prefix for output files.", required=False, default="sc2rf.recombinants")
 @click.option("--min-len", help="Minimum region length.", required=False, default=1000)
 @click.option(
@@ -37,9 +38,6 @@ NO_DATA_CHAR = "NA"
 @click.option(
     "--issues", help="Issues TSV metadata from pango-designation (https://github.com/ktmeaton/ncov-recombinant/raw/master/resources/issues.tsv)", required=False
 )
-@click.option(
-    "--false-positives", help="False positives (TSV) of parents and breakpoints", required=False
-)
 def main(
     csv,
     ansi,
@@ -52,7 +50,7 @@ def main(
     issues,
     qc,
     max_breakpoints,
-    false_positives,
+    motifs,
 ):
     """Detect recombinant seqences from sc2rf. Dependencies: pandas, click"""
 
@@ -66,6 +64,7 @@ def main(
     df["sc2rf_regions_filter"] = [NO_DATA_CHAR] * len(df)
     df["sc2rf_breakpoints_filter"] = [NO_DATA_CHAR] * len(df)
     df["sc2rf_num_breakpoints_filter"] = [NO_DATA_CHAR] * len(df)
+    df["sc2rf_breakpoints_motif"] = [NO_DATA_CHAR] * len(df)    
 
     # if using issues.tsv of pango-designation issues (optional)
     # does lineage assignment by parent+breakpoint matching
@@ -88,8 +87,9 @@ def main(
         # Consider a breakpoint match if within 50 base pairs
         breakpoint_approx_bp = 50
 
-    if false_positives:
-        false_positives_df = pd.read_csv(false_positives, sep="\t")
+    # (Optional) motifs dataframe
+    if motifs:
+        motifs_df = pd.read_csv(motifs, sep="\t")
 
     # Initialize a dictionary of strains to drop with
     # key: strain, value: reason
@@ -293,17 +293,37 @@ def main(
             sc2rf_lineage = ",".join(collapse_lineages_filter)
             df.at[rec[0], "sc2rf_lineage"] = sc2rf_lineage
 
-        # check for false-posisitives, to override lineage call
-        if false_positives:
+        # check for breakpoint motifs, to override lineage call
+        # all breakpoints must include a motif!
+        if motifs:
+            breakpoints_motifs = []
+            for bp in breakpoints_filter:
+                bp_motif = False
+                bp_start = int(bp.split(":")[0])
+                bp_end = int(bp.split(":")[1])
 
-            for false_parents, false_bp in zip(
-                false_positives_df["parents"],
-                false_positives_df["breakpoints"],
-                ):
-                if (
-                    false_parents == clades_filter_csv
-                    and false_bp == breakpoints_filter_csv):
-                    df.at[rec[0], "sc2rf_lineage"] = "false_positive"
+                # Add buffers
+                bp_start = bp_start - breakpoint_approx_bp
+                bp_end = bp_end + breakpoint_approx_bp
+
+                for motif_rec in motifs_df.iterrows():
+                    motif_start = motif_rec[1]["start"]
+                    motif_end = motif_rec[1]["end"]
+
+                    # Is motif contained within the breakpoint
+                    # Allow fuzzy matching
+                    if motif_start >= bp_start and motif_end <= bp_end:
+                        #print("\t\t", motif_start, motif_end)
+                        bp_motif = True
+
+                breakpoints_motifs.append(bp_motif)
+
+            breakpoints_motifs_str = [str(m) for m in breakpoints_motifs]
+            df.at[rec[0],"sc2rf_breakpoints_motif"] = ",".join(breakpoints_motifs_str)
+
+            # Override the linaege call if one breakpoint had not motif
+            if False in breakpoints_motifs:
+                df.at[rec[0], "sc2rf_lineage"] = "false_positive"
 
         df.at[rec[0], "sc2rf_clades_filter"] = ",".join(clades_filter)
         df.at[rec[0], "sc2rf_regions_filter"] = ",".join(regions_filter)
