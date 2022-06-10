@@ -28,7 +28,6 @@ NO_DATA_CHAR = "NA"
     required=False,
     default="Wuhan/Hu-1/2019",
 )
-@click.option("--qc", help="Nextclade QC Output TSV", required=False)
 @click.option(
     "--max-breakpoints",
     help="The maximum number of breakpoints",
@@ -48,7 +47,6 @@ def main(
     custom_ref,
     max_parents,
     issues,
-    qc,
     max_breakpoints,
     motifs,
 ):
@@ -346,17 +344,18 @@ def main(
     df.drop(drop_strains, inplace=True)
 
     # -------------------------------------------------------------------------
-    # force include nextclade recombinants
-    if qc:
-        qc_df = pd.read_csv(qc, sep="\t", index_col=0, low_memory=False)
+    # add in the negatives
 
-        for rec in qc_df.iterrows():
-            strain = rec[0]
-            if strain in df.index:
-                continue
-            if rec[1]["clade"] != "recombinant":
-                continue
-            df.loc[strain] = NO_DATA_CHAR
+    # would be better to do with Bio module, but I just need names not seq
+    with open(aligned) as infile:
+        aligned_content = infile.read()
+        for line in aligned_content.split("\n"):
+            if line.startswith(">"):
+                strain = line.replace(">","")
+                # Ignore this strain if it's already in dataframe (it's a recombinant)
+                if strain in df.index: continue
+                # Otherwise add it, with no data as default           
+                df.loc[strain] = "negative"
 
     # -------------------------------------------------------------------------
     # write output table
