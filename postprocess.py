@@ -187,21 +187,22 @@ def main(
         # Except! If the breakpoints were initially 0
         num_breakpoints = df["breakpoints"][strain]
         num_breakpoints_filter = len(breakpoints_filter)
-        breakpoints_filter_csv = ",".join(breakpoints_filter)
-
-        if (num_breakpoints > 0) and (num_breakpoints_filter > num_breakpoints):
-            false_positives[
-                strain
-            ] = "{} filtered breakpoints > {} raw breakpoints".format(
-                num_breakpoints_filter, num_breakpoints
-            )
 
         # Check for too many breakpoints
-        if num_breakpoints > max_breakpoints:
+        if num_breakpoints_filter > max_breakpoints:
             false_positives[strain] = "{} breakpoints > {} max breakpoints".format(
-                num_breakpoints,
+                num_breakpoints_filter,
                 max_breakpoints,
             )
+
+        # Check if postprocessing increased the number of breakpoints
+        # Why is this bad again? Should be fine as long as we're under the max?
+        # if (num_breakpoints > 0) and (num_breakpoints_filter > num_breakpoints):
+        #     false_positives[
+        #         strain
+        #     ] = "{} filtered breakpoints > {} raw breakpoints".format(
+        #         num_breakpoints_filter, num_breakpoints
+        #     )
 
         # Identify the new filtered clades
         clades_filter = [regions_filter[s]["clade"] for s in regions_filter]
