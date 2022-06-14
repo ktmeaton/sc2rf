@@ -23,12 +23,6 @@ NO_DATA_CHAR = "NA"
     required=False,
 )
 @click.option(
-    "--custom-ref",
-    help="Reference strain name",
-    required=False,
-    default="Wuhan/Hu-1/2019",
-)
-@click.option(
     "--max-breakpoints",
     help="The maximum number of breakpoints",
     required=False,
@@ -44,7 +38,6 @@ def main(
     min_len,
     outdir,
     aligned,
-    custom_ref,
     max_parents,
     issues,
     max_breakpoints,
@@ -58,11 +51,13 @@ def main(
     # sc2rf output (required)
     df = pd.read_csv(csv, sep=",", index_col=0)
     df.fillna("", inplace=True)
+    df["sc2rf_status"] = [NO_DATA_CHAR] * len(df)
+    df["sc2rf_details"] = [NO_DATA_CHAR] * len(df)
     df["sc2rf_clades_filter"] = [NO_DATA_CHAR] * len(df)
     df["sc2rf_regions_filter"] = [NO_DATA_CHAR] * len(df)
     df["sc2rf_breakpoints_filter"] = [NO_DATA_CHAR] * len(df)
     df["sc2rf_num_breakpoints_filter"] = [NO_DATA_CHAR] * len(df)
-    df["sc2rf_breakpoints_motif"] = [NO_DATA_CHAR] * len(df)    
+    df["sc2rf_breakpoints_motif"] = [NO_DATA_CHAR] * len(df)
 
     # if using issues.tsv of pango-designation issues (optional)
     # does lineage assignment by parent+breakpoint matching
@@ -89,11 +84,13 @@ def main(
     if motifs:
         motifs_df = pd.read_csv(motifs, sep="\t")
 
-    # Initialize a dictionary of strains to drop with
+    # Initialize a dictionary of false_positive strains
     # key: strain, value: reason
-    drop_strains = {}
+    false_positives = {}
 
     for rec in df.iterrows():
+
+        strain = rec[0]
 
         regions_str = rec[1]["regions"]
         regions_split = regions_str.split(",")
@@ -165,7 +162,7 @@ def main(
 
         # Check if all the regions were collapsed
         if len(regions_filter) < 2:
-            drop_strains[rec[0]] = "all regions collapsed"
+            false_positives[rec[0]] = "single parent"
 
         # -----------------------------------------------------------------
         # THIRD PASS: BREAKPOINT DETECTION
@@ -188,30 +185,30 @@ def main(
         # check if the number of breakpoints changed
         # the filtered breakpoints should only ever be equal or less
         # Except! If the breakpoints were initially 0
-        num_breakpoints = df["breakpoints"][rec[0]]
+        num_breakpoints = df["breakpoints"][strain]
         num_breakpoints_filter = len(breakpoints_filter)
         breakpoints_filter_csv = ",".join(breakpoints_filter)
 
         if (num_breakpoints > 0) and (num_breakpoints_filter > num_breakpoints):
-            drop_strains[
-                rec[0]
+            false_positives[
+                strain
             ] = "{} filtered breakpoints > {} raw breakpoints".format(
                 num_breakpoints_filter, num_breakpoints
             )
 
         # Check for too many breakpoints
         if num_breakpoints > max_breakpoints:
-            drop_strains[rec[0]] = "{} breakpoints > {} max breakpoints".format(
+            false_positives[strain] = "{} breakpoints > {} max breakpoints".format(
                 num_breakpoints,
                 max_breakpoints,
             )
 
         # Identify the new filtered clades
         clades_filter = [regions_filter[s]["clade"] for s in regions_filter]
-        clades_filter_csv = ",".join(clades_filter)
+        #clades_filter_csv = ",".join(clades_filter)
         num_parents = len(set(clades_filter))
         if num_parents > max_parents:
-            drop_strains[rec[0]] = "{} parents > {}".format(num_parents, max_parents)
+            false_positives[strain] = "{} parents > {}".format(num_parents, max_parents)
 
         # Extract the lengths of each region
         regions_length = [str(regions_filter[s]["end"] - s) for s in regions_filter]
@@ -289,7 +286,7 @@ def main(
                 collapse_lineages_filter = [NO_DATA_CHAR]
 
             sc2rf_lineage = ",".join(collapse_lineages_filter)
-            df.at[rec[0], "sc2rf_lineage"] = sc2rf_lineage
+            df.at[strain, "sc2rf_lineage"] = sc2rf_lineage
 
         # check for breakpoint motifs, to override lineage call
         # all breakpoints must include a motif!
@@ -317,45 +314,54 @@ def main(
                 breakpoints_motifs.append(bp_motif)
 
             breakpoints_motifs_str = [str(m) for m in breakpoints_motifs]
-            df.at[rec[0],"sc2rf_breakpoints_motif"] = ",".join(breakpoints_motifs_str)
+            df.at[strain,"sc2rf_breakpoints_motif"] = ",".join(breakpoints_motifs_str)
 
             # Override the linaege call if one breakpoint had not motif
             if False in breakpoints_motifs:
-                df.at[rec[0], "sc2rf_lineage"] = "false_positive"
+                df.at[strain, "sc2rf_lineage"] = "false_positive"
 
-        df.at[rec[0], "sc2rf_clades_filter"] = ",".join(clades_filter)
-        df.at[rec[0], "sc2rf_regions_filter"] = ",".join(regions_filter)
-        df.at[rec[0], "sc2rf_regions_length"] = ",".join(regions_length)
-        df.at[rec[0], "sc2rf_breakpoints_filter"] = ",".join(breakpoints_filter)
-        df.at[rec[0], "sc2rf_num_breakpoints_filter"] = num_breakpoints_filter
+        df.at[strain, "sc2rf_clades_filter"] = ",".join(clades_filter)
+        df.at[strain, "sc2rf_regions_filter"] = ",".join(regions_filter)
+        df.at[strain, "sc2rf_regions_length"] = ",".join(regions_length)
+        df.at[strain, "sc2rf_breakpoints_filter"] = ",".join(breakpoints_filter)
+        df.at[strain, "sc2rf_num_breakpoints_filter"] = num_breakpoints_filter
+        if strain in false_positives:
+            df.at[strain, "sc2rf_status"]  = "false_positive"
+            df.at[strain, "sc2rf_details"] = false_positives[strain]
+            df.at[strain, "sc2rf_breakpoints_filter"]  = NO_DATA_CHAR
+        else:
+            df.at[strain, "sc2rf_status"]  = "positive"
 
     # write exclude strains
     outpath_exclude = os.path.join(outdir, prefix + ".exclude.tsv")
-    if len(drop_strains) > 0:
+    if len(false_positives) > 0:
         with open(outpath_exclude, "w") as outfile:
-            for strain, reason in drop_strains.items():
+            for strain, reason in false_positives.items():
                 outfile.write(strain + "\t" + reason + "\n")
     else:
         cmd = "touch {outpath}".format(outpath=outpath_exclude)
         os.system(cmd)
-
+        
     # drop strains
-    drop_strains = set(drop_strains.keys())
-    df.drop(drop_strains, inplace=True)
+    #false_positives = set(false_positives.keys())
+    #df.drop(false_positives, inplace=True)
 
     # -------------------------------------------------------------------------
-    # add in the negatives
+    # Add in the Negatives (if alignment was specified)
+    # Avoiding the Bio module, I just need names not sequence
 
-    # would be better to do with Bio module, but I just need names not seq
-    with open(aligned) as infile:
-        aligned_content = infile.read()
-        for line in aligned_content.split("\n"):
-            if line.startswith(">"):
-                strain = line.replace(">","")
-                # Ignore this strain if it's already in dataframe (it's a recombinant)
-                if strain in df.index: continue
-                # Otherwise add it, with no data as default           
-                df.loc[strain] = "negative"
+    if aligned:
+        with open(aligned) as infile:
+            aligned_content = infile.read()
+            for line in aligned_content.split("\n"):
+                if line.startswith(">"):
+                    strain = line.replace(">","")
+                    # Ignore this strain if it's already in dataframe (it's a recombinant)
+                    if strain in df.index: continue
+                    # Otherwise add it, with no data as default           
+                    df.loc[strain] = NO_DATA_CHAR
+                    df.at[strain, "sc2rf_status"]  = "negative"
+                    df.at[strain, "sc2rf_details"]  = "no recombination detected"
 
     # -------------------------------------------------------------------------
     # write output table
@@ -383,16 +389,20 @@ def main(
     # -------------------------------------------------------------------------
     # write output strains
     outpath_strains = os.path.join(outdir, prefix + ".txt")
-    strains = list(df.index)
+    strains_df = df[
+        (df["sc2rf_status"] != "negative") 
+        & (df["sc2rf_status"] != "false_positive")
+    ]
+    strains = list(strains_df.index)
     strains_txt = "\n".join(strains)
     with open(outpath_strains, "w") as outfile:
-        outfile.write(strains_txt + "\n")
+        outfile.write(strains_txt)
 
     # -------------------------------------------------------------------------
     # filter the ansi output
     if ansi:
         outpath_ansi = os.path.join(outdir, prefix + ".ansi.txt")
-        if len(drop_strains) > 0:
+        if len(false_positives) > 0:
             cmd = "cut -f 1 {exclude} | grep -v -f - {inpath} > {outpath}".format(
                 exclude=outpath_exclude,
                 inpath=ansi,
@@ -410,15 +420,7 @@ def main(
     if aligned:
         outpath_fasta = os.path.join(outdir, prefix + ".fasta")
 
-        # first extract the reference genome
-        cmd = "seqkit grep -p '{custom_ref}' {aligned} > {outpath_fasta};".format(
-            custom_ref=custom_ref,
-            aligned=aligned,
-            outpath_fasta=outpath_fasta,
-        )
-        os.system(cmd)
-        # Next all the recombinant strains
-        cmd = "seqkit grep -f {outpath_strains} {aligned} >> {outpath_fasta};".format(
+        cmd = "seqkit grep -f {outpath_strains} {aligned} > {outpath_fasta};".format(
             outpath_strains=outpath_strains,
             aligned=aligned,
             outpath_fasta=outpath_fasta,
