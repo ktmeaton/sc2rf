@@ -109,12 +109,13 @@ def main():
     parser.add_argument('--hide-progress', action='store_true', help="Don't show progress bars during long task.")
     parser.add_argument('--csvfile', type=argparse.FileType('w'), help="Path to write results in CSV format.")
     parser.add_argument('--ignore-shared-subs', action='store_true', help="Ignore substitutions that are shared between all parents.")
-    parser.add_argument('--sc2rf-dir', required=False, help="Path to the sc2rf directory.", default=".")  
+
+    sc2rf_dir= os.path.dirname(os. path. realpath(__file__))
 
     global args
     args = parser.parse_args()
 
-    mapping_path = os.path.join(args.sc2rf_dir, "mapping.csv")
+    mapping_path = os.path.join(sc2rf_dir, "mapping.csv")
     mappings = read_mappings(mapping_path)    
 
     if args.ansi:
@@ -140,10 +141,10 @@ def main():
 
     global reference
     vprint("Reading reference genome, lineage definitions...")
-    reference_path = os.path.join(args.sc2rf_dir, "reference.fasta")
+    reference_path = os.path.join(sc2rf_dir, "reference.fasta")
     reference = read_fasta(reference_path, None)['MN908947 (Wuhan-Hu-1/2019)']
 
-    virus_properties_path = os.path.join(args.sc2rf_dir, "virus_properties.json")
+    virus_properties_path = os.path.join(sc2rf_dir, "virus_properties.json")
     all_examples = read_examples(virus_properties_path)
 
     used_examples = []
