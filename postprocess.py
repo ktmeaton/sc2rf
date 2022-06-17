@@ -3,9 +3,9 @@
 import pandas as pd
 import click
 import os
+import logging
 
 NO_DATA_CHAR = "NA"
-
 
 @click.command()
 @click.option("--csv", help="CSV output from sc2rf.", required=True)
@@ -31,6 +31,7 @@ NO_DATA_CHAR = "NA"
 @click.option(
     "--issues", help="Issues TSV metadata from pango-designation (https://github.com/ktmeaton/ncov-recombinant/raw/master/resources/issues.tsv)", required=False
 )
+@click.option("--log", help="Path to a log file", required=False, default="postprocess.log")
 def main(
     csv,
     ansi,
@@ -42,13 +43,29 @@ def main(
     issues,
     max_breakpoints,
     motifs,
+    log,
 ):
     """Detect recombinant seqences from sc2rf. Dependencies: pandas, click"""
+
+    # Check for directory
+    if not os.path.exists(outdir):
+        os.mkdir(outdir)
+
+    # create logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+
+    # create file handler which logs even debug messages
+    fh = logging.FileHandler(log)
+    fh.setLevel(logging.DEBUG)
+    logger.addHandler(fh)
 
     # -----------------------------------------------------------------------------
     # Import Dataframe
 
     # sc2rf output (required)
+    logging.info("Reading input data: {}".format(csv))
+
     df = pd.read_csv(csv, sep=",", index_col=0)
     df.fillna("", inplace=True)
     df["sc2rf_status"] = [NO_DATA_CHAR] * len(df)
@@ -62,6 +79,8 @@ def main(
     # if using issues.tsv of pango-designation issues (optional)
     # does lineage assignment by parent+breakpoint matching
     if issues:
+
+        logging.info("Parsing issues: {}".format(issues))
 
         df["sc2rf_lineage"] = [NO_DATA_CHAR] * len(df)
         breakpoint_col = "breakpoints_curated"
@@ -82,11 +101,14 @@ def main(
 
     # (Optional) motifs dataframe
     if motifs:
+        logging.info("Parsing motifs: {}".format(motifs))
         motifs_df = pd.read_csv(motifs, sep="\t")
 
     # Initialize a dictionary of false_positive strains
     # key: strain, value: reason
     false_positives = {}
+
+    logging.info("Post-processing table: {}".format(csv))
 
     for rec in df.iterrows():
 
@@ -122,6 +144,7 @@ def main(
             # Is this the first region?
             if not prev_clade:
                 regions_filter[start_coord] = {"clade": clade, "end": end_coord}
+                prev_clade = clade
                 prev_start_coord = start_coord
 
             # -----------------------------------------------------------------
@@ -147,6 +170,10 @@ def main(
                 else:
                     regions_filter[start_coord] = {"clade": clade, "end": end_coord}
                     break
+
+            # Check if the reveres iter collapse wound up deleting all the regions
+            if len(regions_filter) == 0:
+                regions_filter[start_coord] = {"clade": clade, "end": end_coord}
 
             # These get updated regardless of condition
             prev_clade = clade
@@ -184,8 +211,9 @@ def main(
 
         # check if the number of breakpoints changed
         # the filtered breakpoints should only ever be equal or less
+        # 2022-06-17: Why? Under what conditions does the filtered breakpoints increase?
         # Except! If the breakpoints were initially 0
-        num_breakpoints = df["breakpoints"][strain]
+        #num_breakpoints = df["breakpoints"][strain]
         num_breakpoints_filter = len(breakpoints_filter)
 
         # Check for too many breakpoints
@@ -314,12 +342,19 @@ def main(
 
                 breakpoints_motifs.append(bp_motif)
 
-            breakpoints_motifs_str = [str(m) for m in breakpoints_motifs]
+            # If there's a lone "False" value, it gets re-coded to an empty string on export
+            # To prevent that, force it to be the NO_DATA_CHAR (ex. 'NA')
+            if len(breakpoints_motifs) == 0:
+                breakpoints_motifs_str = [NO_DATA_CHAR]
+            else:
+                breakpoints_motifs_str = [str(m) for m in breakpoints_motifs]
+
             df.at[strain,"sc2rf_breakpoints_motif"] = ",".join(breakpoints_motifs_str)
 
             # Override the linaege call if one breakpoint had not motif
             if False in breakpoints_motifs:
                 df.at[strain, "sc2rf_lineage"] = "false_positive"
+                df.at[strain, "sc2rf_status"]  = "false_positive"
 
         df.at[strain, "sc2rf_clades_filter"] = ",".join(clades_filter)
         df.at[strain, "sc2rf_regions_filter"] = ",".join(regions_filter)
@@ -352,6 +387,7 @@ def main(
     # Avoiding the Bio module, I just need names not sequence
 
     if aligned:
+        logging.info("Reporting non-recombinants in the alignment: {}".format(aligned))        
         with open(aligned) as infile:
             aligned_content = infile.read()
             for line in aligned_content.split("\n"):
@@ -385,6 +421,8 @@ def main(
         inplace=True,
     )
     outpath_rec = os.path.join(outdir, prefix + ".tsv")
+
+    logging.info("Writing the output table: {}".format(outpath_rec))    
     df.to_csv(outpath_rec, sep="\t", index=False)
 
     # -------------------------------------------------------------------------
@@ -402,7 +440,9 @@ def main(
     # -------------------------------------------------------------------------
     # filter the ansi output
     if ansi:
+        
         outpath_ansi = os.path.join(outdir, prefix + ".ansi.txt")
+        logging.info("Writing filtered ansi input: {}".format(outpath_ansi))        
         if len(false_positives) > 0:
             cmd = "cut -f 1 {exclude} | grep -v -f - {inpath} > {outpath}".format(
                 exclude=outpath_exclude,
@@ -420,6 +460,7 @@ def main(
     # write alignment
     if aligned:
         outpath_fasta = os.path.join(outdir, prefix + ".fasta")
+        logging.info("Writing filtered alignment: {}".format(outpath_fasta)) 
 
         cmd = "seqkit grep -f {outpath_strains} {aligned} > {outpath_fasta};".format(
             outpath_strains=outpath_strains,
