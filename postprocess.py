@@ -4,8 +4,11 @@ import pandas as pd
 import click
 import os
 import logging
+import requests
 
 NO_DATA_CHAR = "NA"
+LAPIS_URL_BASE = "https://lapis.cov-spectrum.org/open/v1/sample/aggregated?fields=pangoLineage&nucMutations="
+LINEAGE_PROP_THRESHOLD = 0.01
 
 @click.command()
 @click.option("--csv", help="CSV output from sc2rf.", required=True)
@@ -20,6 +23,11 @@ NO_DATA_CHAR = "NA"
 @click.option(
     "--aligned",
     help="Extract recombinants from this alignment (Note: requires seqkit)",
+    required=False,
+)
+@click.option(
+    "--nextclade",
+    help="The TSV output of Nextclade, to use the substitutions columns to find the parent lineages.",
     required=False,
 )
 @click.option(
@@ -39,6 +47,7 @@ def main(
     min_len,
     outdir,
     aligned,
+    nextclade,
     max_parents,
     issues,
     max_breakpoints,
@@ -70,11 +79,16 @@ def main(
     df.fillna("", inplace=True)
     df["sc2rf_status"] = [NO_DATA_CHAR] * len(df)
     df["sc2rf_details"] = [NO_DATA_CHAR] * len(df)
-    df["sc2rf_clades_filter"] = [NO_DATA_CHAR] * len(df)
+    df["sc2rf_lineage"] = [NO_DATA_CHAR] * len(df)
+    df["sc2rf_clades_filter"] = [NO_DATA_CHAR] * len(df)   
     df["sc2rf_regions_filter"] = [NO_DATA_CHAR] * len(df)
+    df["sc2rf_regions_length"] = [NO_DATA_CHAR] * len(df)
     df["sc2rf_breakpoints_filter"] = [NO_DATA_CHAR] * len(df)
     df["sc2rf_num_breakpoints_filter"] = [NO_DATA_CHAR] * len(df)
     df["sc2rf_breakpoints_motif"] = [NO_DATA_CHAR] * len(df)
+    df["cov-spectrum_parents"] = [NO_DATA_CHAR] * len(df)
+    df["cov-spectrum_parents_confidence"] = [NO_DATA_CHAR] * len(df)
+    df["cov-spectrum_parents_subs"] = [NO_DATA_CHAR] * len(df)
 
     # if using issues.tsv of pango-designation issues (optional)
     # does lineage assignment by parent+breakpoint matching
@@ -82,7 +96,6 @@ def main(
 
         logging.info("Parsing issues: {}".format(issues))
 
-        df["sc2rf_lineage"] = [NO_DATA_CHAR] * len(df)
         breakpoint_col = "breakpoints_curated"
         parents_col = "parents_curated"
         breakpoint_df = pd.read_csv(issues, sep="\t")
@@ -103,6 +116,12 @@ def main(
     if motifs:
         logging.info("Parsing motifs: {}".format(motifs))
         motifs_df = pd.read_csv(motifs, sep="\t")
+
+    # (Optional) nextclade tsv dataframe
+    if nextclade:
+        logging.info("Parsing nextclade: {}".format(nextclade))
+        nextclade_df = pd.read_csv(nextclade, sep="\t", index_col=0)
+        nextclade_df.fillna(NO_DATA_CHAR, inplace=True)
 
     # Initialize a dictionary of false_positive strains
     # key: strain, value: reason
@@ -319,6 +338,7 @@ def main(
 
         # check for breakpoint motifs, to override lineage call
         # all breakpoints must include a motif!
+        # ---------------------------------------------------------------------
         if motifs:
             breakpoints_motifs = []
             for bp in breakpoints_filter:
@@ -356,6 +376,100 @@ def main(
                 df.at[strain, "sc2rf_lineage"] = "false_positive"
                 df.at[strain, "sc2rf_status"]  = "false_positive"
 
+        # ---------------------------------------------------------------------
+        # Identify parent lineages by querying cov-spectrum mutations
+
+        if nextclade:
+
+            parent_lineages = []
+            parent_lineages_confidence = []
+            parent_lineages_subs = []
+
+            substitutions = nextclade_df["substitutions"][strain].split(",")
+            unlabeled_privates = nextclade_df["privateNucMutations.unlabeledSubstitutions"][strain].split(",")
+
+            # Remove NA char
+            if NO_DATA_CHAR in substitutions:
+                substitutions.remove(NO_DATA_CHAR)
+            if NO_DATA_CHAR in unlabeled_privates:
+                unlabeled_privates.remove(NO_DATA_CHAR)
+
+            # Exclude privates from mutations to query
+            for private in unlabeled_privates:
+                # Might not be in there if it's an indel
+                if private in substitutions:
+                    substitutions.remove(private) 
+
+            # Split mutations by region
+            for region in regions_filter:
+                region_coords = region.split("|")[0]
+                region_start = int(region_coords.split(":")[0])
+                region_end = int(region_coords.split(":")[1])
+                region_subs = []
+
+                for sub in substitutions:
+                    sub_coord = int(sub[1:-1])
+                    if sub_coord >= region_start and sub_coord <= region_end:
+                        region_subs.append(sub)
+
+                region_subs_csv = ",".join(region_subs)
+                # Query cov-spectrum
+                url = LAPIS_URL_BASE + region_subs_csv
+                r = requests.get(url)
+                result = r.json()
+                lineage_data = result["data"]
+
+                # Have keys be counts
+                lineage_dict = {}
+                for rec in lineage_data:
+                    lineage = rec["pangoLineage"]
+                    count = rec["count"]
+                    lineage_dict[count] = lineage
+
+                # Sort in order
+                lineage_dict = {k:lineage_dict[k] for k in sorted(lineage_dict, reverse=True)}
+
+                if len(lineage_dict) == 0:
+                    max_lineage = NO_DATA_CHAR
+                    max_prop = NO_DATA_CHAR
+                else:
+                    # Temporarily set to fake data
+                    total_lineages = sum(lineage_dict.keys())
+                    max_count = max(lineage_dict.keys())
+                    max_prop = max_count / total_lineages                
+                    max_lineage = lineage_dict[max_count]
+
+                    # Don't want to report recombinants as parents yet
+                    while max_lineage.startswith("X") or max_lineage == "Unassigned":
+                        lineage_dict = {
+                            count:lineage for count,lineage in lineage_dict.items() 
+                            if lineage != max_lineage
+                        }
+                        # If there are no other options, set to NA
+                        if len(lineage_dict) == 0:
+                            max_lineage = NO_DATA_CHAR
+                            break
+                        # Otherwise try again!
+                        else:
+                            # For now, deliberately don't update total_lineages
+                            max_count = max(lineage_dict.keys())
+                            max_prop = max_count / total_lineages                
+                            max_lineage = lineage_dict[max_count]               
+                
+                parent_lineages_sub_str = "{}|{}".format(region_subs_csv, max_lineage)
+
+                parent_lineages.append(max_lineage)
+                parent_lineages_confidence.append(max_prop)
+                parent_lineages_subs.append(parent_lineages_sub_str)
+
+            # Update the dataframe columns
+            df.at[strain, "cov-spectrum_parents"] = ",".join(parent_lineages)
+            df.at[strain, "cov-spectrum_parents_confidence"] = ",".join(
+                str(round(c,3)) if type(c) == float else NO_DATA_CHAR
+                for c in parent_lineages_confidence
+            )
+            df.at[strain, "cov-spectrum_parents_subs"] = ";".join(parent_lineages_subs)
+
         df.at[strain, "sc2rf_clades_filter"] = ",".join(clades_filter)
         df.at[strain, "sc2rf_regions_filter"] = ",".join(regions_filter)
         df.at[strain, "sc2rf_regions_length"] = ",".join(regions_length)
@@ -381,6 +495,8 @@ def main(
     # drop strains
     #false_positives = set(false_positives.keys())
     #df.drop(false_positives, inplace=True)
+
+
 
     # -------------------------------------------------------------------------
     # Add in the Negatives (if alignment was specified)
