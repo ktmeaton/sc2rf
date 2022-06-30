@@ -5,10 +5,27 @@ import click
 import os
 import logging
 import requests
+import sys
+import time
 
 NO_DATA_CHAR = "NA"
 LAPIS_URL_BASE = "https://lapis.cov-spectrum.org/open/v1/sample/aggregated?fields=pangoLineage&nucMutations="
 LINEAGE_PROP_THRESHOLD = 0.01
+LAPIS_SLEEP_TIME = 1
+
+def create_logger(logfile=None):
+    # create logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+
+    # create file handler which logs even debug messages
+    if logfile:
+        handler = logging.FileHandler(logfile)
+    else:
+        handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    return logger
 
 @click.command()
 @click.option("--csv", help="CSV output from sc2rf.", required=True)
@@ -39,7 +56,7 @@ LINEAGE_PROP_THRESHOLD = 0.01
 @click.option(
     "--issues", help="Issues TSV metadata from pango-designation (https://github.com/ktmeaton/ncov-recombinant/raw/master/resources/issues.tsv)", required=False
 )
-@click.option("--log", help="Path to a log file", required=False, default="postprocess.log")
+@click.option("--log", help="Path to a log file", required=False)
 def main(
     csv,
     ansi,
@@ -61,22 +78,18 @@ def main(
         os.mkdir(outdir)
 
     # create logger
-    logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
-
-    # create file handler which logs even debug messages
-    fh = logging.FileHandler(log)
-    fh.setLevel(logging.DEBUG)
-    logger.addHandler(fh)
+    logger = create_logger(logfile=log)
 
     # -----------------------------------------------------------------------------
     # Import Dataframe
 
     # sc2rf output (required)
-    logging.info("Reading input data: {}".format(csv))
+    logger.info("Reading input data: {}".format(csv))
 
     df = pd.read_csv(csv, sep=",", index_col=0)
     df.fillna("", inplace=True)
+
+    # Initialize dataframe columns to NA
     df["sc2rf_status"] = [NO_DATA_CHAR] * len(df)
     df["sc2rf_details"] = [NO_DATA_CHAR] * len(df)
     df["sc2rf_lineage"] = [NO_DATA_CHAR] * len(df)
@@ -94,7 +107,7 @@ def main(
     # does lineage assignment by parent+breakpoint matching
     if issues:
 
-        logging.info("Parsing issues: {}".format(issues))
+        logger.info("Parsing issues: {}".format(issues))
 
         breakpoint_col = "breakpoints_curated"
         parents_col = "parents_curated"
@@ -114,12 +127,12 @@ def main(
 
     # (Optional) motifs dataframe
     if motifs:
-        logging.info("Parsing motifs: {}".format(motifs))
+        logger.info("Parsing motifs: {}".format(motifs))
         motifs_df = pd.read_csv(motifs, sep="\t")
 
     # (Optional) nextclade tsv dataframe
     if nextclade:
-        logging.info("Parsing nextclade: {}".format(nextclade))
+        logger.info("Parsing nextclade: {}".format(nextclade))
         nextclade_df = pd.read_csv(nextclade, sep="\t", index_col=0)
         nextclade_df.fillna(NO_DATA_CHAR, inplace=True)
 
@@ -127,7 +140,7 @@ def main(
     # key: strain, value: reason
     false_positives = {}
 
-    logging.info("Post-processing table: {}".format(csv))
+    logger.info("Post-processing table: {}".format(csv))
 
     for rec in df.iterrows():
 
@@ -376,10 +389,42 @@ def main(
                 df.at[strain, "sc2rf_lineage"] = "false_positive"
                 df.at[strain, "sc2rf_status"]  = "false_positive"
 
-        # ---------------------------------------------------------------------
-        # Identify parent lineages by querying cov-spectrum mutations
+        df.at[strain, "sc2rf_clades_filter"] = ",".join(clades_filter)
+        df.at[strain, "sc2rf_regions_filter"] = ",".join(regions_filter)
+        df.at[strain, "sc2rf_regions_length"] = ",".join(regions_length)
+        df.at[strain, "sc2rf_breakpoints_filter"] = ",".join(breakpoints_filter)
+        df.at[strain, "sc2rf_num_breakpoints_filter"] = num_breakpoints_filter
+        if strain in false_positives:
+            df.at[strain, "sc2rf_status"]  = "false_positive"
+            df.at[strain, "sc2rf_details"] = false_positives[strain]
+            df.at[strain, "sc2rf_breakpoints_filter"]  = NO_DATA_CHAR
+        else:
+            df.at[strain, "sc2rf_status"]  = "positive"
 
-        if nextclade:
+    # ---------------------------------------------------------------------
+    # Identify parent lineages by querying cov-spectrum mutations
+
+    # We can only do this is:
+    # 1. A nextclade tsv file was specified with mutations
+    # 2. Multiple regions were detected (not collapsed down to one parent region)
+    if nextclade:
+
+        logger.info("Identifying parent lineages based on nextclade substitutions")
+
+        positive_df = df[df["sc2rf_status"] == "positive"]
+        total_positives = len(positive_df)
+        progress_i = 0
+
+        # keys = query, value = json
+        query_subs_dict = {}
+
+        for rec in positive_df.iterrows():
+
+            strain = rec[0]
+            progress_i += 1
+            logger.info("{} / {}: {}".format(progress_i, total_positives, strain))
+
+            regions_filter = positive_df["sc2rf_regions_filter"][strain].split(",")
 
             parent_lineages = []
             parent_lineages_confidence = []
@@ -413,11 +458,22 @@ def main(
                         region_subs.append(sub)
 
                 region_subs_csv = ",".join(region_subs)
-                # Query cov-spectrum
-                url = LAPIS_URL_BASE + region_subs_csv
-                r = requests.get(url)
-                result = r.json()
-                lineage_data = result["data"]
+
+                # Check if we already fetched this subs combo
+                if region_subs_csv in query_subs_dict:
+                    logger.info("\tUsing cache for region {}".format(region_coords))
+                    lineage_data = query_subs_dict[region_subs_csv]
+                # Otherwise, query cov-spectrum for these subs
+                else:
+                    query_subs_dict[region_subs_csv] = ""
+                    url = LAPIS_URL_BASE + region_subs_csv
+                    logger.info("Querying cov-spectrum for region {}".format(region_coords))
+                    r = requests.get(url)
+                    # Sleep after fetching
+                    time.sleep(LAPIS_SLEEP_TIME)
+                    result = r.json()
+                    lineage_data = result["data"]
+                    query_subs_dict[region_subs_csv] = lineage_data
 
                 # Have keys be counts
                 lineage_dict = {}
@@ -429,6 +485,7 @@ def main(
                 # Sort in order
                 lineage_dict = {k:lineage_dict[k] for k in sorted(lineage_dict, reverse=True)}
 
+                # If no matches were found, report NA for lineage
                 if len(lineage_dict) == 0:
                     max_lineage = NO_DATA_CHAR
                     max_prop = NO_DATA_CHAR
@@ -468,19 +525,7 @@ def main(
                 str(round(c,3)) if type(c) == float else NO_DATA_CHAR
                 for c in parent_lineages_confidence
             )
-            df.at[strain, "cov-spectrum_parents_subs"] = ";".join(parent_lineages_subs)
-
-        df.at[strain, "sc2rf_clades_filter"] = ",".join(clades_filter)
-        df.at[strain, "sc2rf_regions_filter"] = ",".join(regions_filter)
-        df.at[strain, "sc2rf_regions_length"] = ",".join(regions_length)
-        df.at[strain, "sc2rf_breakpoints_filter"] = ",".join(breakpoints_filter)
-        df.at[strain, "sc2rf_num_breakpoints_filter"] = num_breakpoints_filter
-        if strain in false_positives:
-            df.at[strain, "sc2rf_status"]  = "false_positive"
-            df.at[strain, "sc2rf_details"] = false_positives[strain]
-            df.at[strain, "sc2rf_breakpoints_filter"]  = NO_DATA_CHAR
-        else:
-            df.at[strain, "sc2rf_status"]  = "positive"
+            df.at[strain, "cov-spectrum_parents_subs"] = ";".join(parent_lineages_subs)            
 
     # write exclude strains
     outpath_exclude = os.path.join(outdir, prefix + ".exclude.tsv")
@@ -503,7 +548,7 @@ def main(
     # Avoiding the Bio module, I just need names not sequence
 
     if aligned:
-        logging.info("Reporting non-recombinants in the alignment: {}".format(aligned))        
+        logger.info("Reporting non-recombinants in the alignment: {}".format(aligned))        
         with open(aligned) as infile:
             aligned_content = infile.read()
             for line in aligned_content.split("\n"):
@@ -538,7 +583,7 @@ def main(
     )
     outpath_rec = os.path.join(outdir, prefix + ".tsv")
 
-    logging.info("Writing the output table: {}".format(outpath_rec))    
+    logger.info("Writing the output table: {}".format(outpath_rec))    
     df.to_csv(outpath_rec, sep="\t", index=False)
 
     # -------------------------------------------------------------------------
@@ -558,7 +603,7 @@ def main(
     if ansi:
         
         outpath_ansi = os.path.join(outdir, prefix + ".ansi.txt")
-        logging.info("Writing filtered ansi input: {}".format(outpath_ansi))        
+        logger.info("Writing filtered ansi input: {}".format(outpath_ansi))        
         if len(false_positives) > 0:
             cmd = "cut -f 1 {exclude} | grep -v -f - {inpath} > {outpath}".format(
                 exclude=outpath_exclude,
@@ -576,7 +621,7 @@ def main(
     # write alignment
     if aligned:
         outpath_fasta = os.path.join(outdir, prefix + ".fasta")
-        logging.info("Writing filtered alignment: {}".format(outpath_fasta)) 
+        logger.info("Writing filtered alignment: {}".format(outpath_fasta)) 
 
         cmd = "seqkit grep -f {outpath_strains} {aligned} > {outpath_fasta};".format(
             outpath_strains=outpath_strains,
