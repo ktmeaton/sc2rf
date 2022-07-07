@@ -11,7 +11,7 @@ import time
 NO_DATA_CHAR = "NA"
 LAPIS_URL_BASE = "https://lapis.cov-spectrum.org/open/v1/sample/aggregated?fields=pangoLineage&nucMutations="
 LINEAGE_PROP_THRESHOLD = 0.01
-LAPIS_SLEEP_TIME = 1
+LAPIS_SLEEP_TIME = 0
 
 def create_logger(logfile=None):
     # create logger
@@ -99,6 +99,7 @@ def main(
     df["sc2rf_breakpoints_filter"] = [NO_DATA_CHAR] * len(df)
     df["sc2rf_num_breakpoints_filter"] = [NO_DATA_CHAR] * len(df)
     df["sc2rf_breakpoints_motif"] = [NO_DATA_CHAR] * len(df)
+    df["sc2rf_unique_subs_filter"] = [NO_DATA_CHAR] * len(df)
     df["cov-spectrum_parents"] = [NO_DATA_CHAR] * len(df)
     df["cov-spectrum_parents_confidence"] = [NO_DATA_CHAR] * len(df)
     df["cov-spectrum_parents_subs"] = [NO_DATA_CHAR] * len(df)
@@ -149,8 +150,12 @@ def main(
         regions_str = rec[1]["regions"]
         regions_split = regions_str.split(",")
 
+        unique_subs_str = rec[1]["unique_subs"]
+        unique_subs_split = unique_subs_str.split(",")
+
         # Keys are going to be the start coord of the region
         regions_filter = {}
+        unique_subs_filter = []
         breakpoints_filter = []
 
         prev_clade = None
@@ -218,6 +223,34 @@ def main(
             region_len = end_coord - start_coord
             if region_len < min_len:
                 del regions_filter[start_coord]
+
+        # -----------------------------------------------------------------
+        # THIRD PASS: UNIQUE SUBSTITUTIONS
+  
+        # Check that all regions have a unique sub
+        regions_filter_unique_subs = {}
+        for start_coord in regions_filter:
+            clade = regions_filter[start_coord]["clade"]
+            end_coord = regions_filter[start_coord]["end"]     
+
+            region_contains_unique_sub = False
+
+            for sub in unique_subs_split:
+                sub_coord = int(sub.split("|")[0])
+                sub_parent = sub.split("|")[1]
+
+                if (
+                    sub_coord >= start_coord 
+                    and sub_coord <= end_coord
+                    and sub_parent == clade
+                ):
+                    region_contains_unique_sub = True
+                    unique_subs_filter.append(sub)
+
+            if region_contains_unique_sub: 
+                regions_filter_unique_subs[start_coord] = regions_filter[start_coord]
+
+        regions_filter = regions_filter_unique_subs
 
         # Check if all the regions were collapsed
         if len(regions_filter) < 2:
@@ -384,16 +417,18 @@ def main(
 
             df.at[strain,"sc2rf_breakpoints_motif"] = ",".join(breakpoints_motifs_str)
 
-            # Override the linaege call if one breakpoint had not motif
+            # Override the linaege call if one breakpoint had no motif
             if False in breakpoints_motifs:
                 df.at[strain, "sc2rf_lineage"] = "false_positive"
                 df.at[strain, "sc2rf_status"]  = "false_positive"
+                false_positives[strain] = "missing breakpoint motif"
 
         df.at[strain, "sc2rf_clades_filter"] = ",".join(clades_filter)
         df.at[strain, "sc2rf_regions_filter"] = ",".join(regions_filter)
         df.at[strain, "sc2rf_regions_length"] = ",".join(regions_length)
         df.at[strain, "sc2rf_breakpoints_filter"] = ",".join(breakpoints_filter)
         df.at[strain, "sc2rf_num_breakpoints_filter"] = num_breakpoints_filter
+        df.at[strain, "sc2rf_unique_subs_filter"] = ",".join(unique_subs_filter)
         if strain in false_positives:
             df.at[strain, "sc2rf_status"]  = "false_positive"
             df.at[strain, "sc2rf_details"] = false_positives[strain]
@@ -566,7 +601,7 @@ def main(
 
     # Drop old columns
     df.drop(
-        ["examples", "intermissions", "breakpoints", "regions"],
+        ["examples", "intermissions", "breakpoints", "regions", "unique_subs"],
         axis="columns",
         inplace=True,
     )
@@ -577,13 +612,16 @@ def main(
             "sc2rf_regions_filter": "sc2rf_regions",
             "sc2rf_breakpoints_filter": "sc2rf_breakpoints",
             "sc2rf_num_breakpoints_filter": "sc2rf_num_breakpoints",
+            "sc2rf_unique_subs_filter": "sc2rf_unique_subs",
         },
         axis="columns",
         inplace=True,
     )
+    # Sort by status
+    df.sort_values(by=["sc2rf_status","sc2rf_lineage"], inplace=True, ascending=False)
     outpath_rec = os.path.join(outdir, prefix + ".tsv")
 
-    logger.info("Writing the output table: {}".format(outpath_rec))    
+    logger.info("Writing the output table: {}".format(outpath_rec))
     df.to_csv(outpath_rec, sep="\t", index=False)
 
     # -------------------------------------------------------------------------

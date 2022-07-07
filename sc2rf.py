@@ -211,7 +211,7 @@ def main():
     if len(match_sets):
         writer = None
         if args.csvfile:
-            fieldnames = ['sample', 'examples', 'intermissions', 'breakpoints', 'regions']
+            fieldnames = ['sample', 'examples', 'intermissions', 'breakpoints', 'regions', "unique_subs"]
             if args.show_private_mutations: fieldnames.append('privates')
             writer = csv.DictWriter(args.csvfile, fieldnames=fieldnames)
             writer.writeheader()
@@ -277,8 +277,10 @@ def rebuild_examples():
                 query = f"?variantQuery={urllib.parse.quote_plus(variant_props['Query'])}"
             elif pango and len(pango) > 0:
                 query = f"?pangoLineage={pango}*"
-            elif clade and len(clade) > 0:
+            elif clade and len(clade) > 0 and who_label:
                 query = f"?nextstrainClade={clade}%20({who_label})"
+            elif clade and len(clade) > 0 and not who_label: 
+                query = f"?nextstrainClade={clade}"
             else:
                 print("Variant has neither pango nor clade, check out mapping.csv!")
                 continue
@@ -673,9 +675,16 @@ def show_matches(examples, samples, writer):
                 if coord in ex_coords:
                     parents_matches += 1
 
-            # check if this coord was not found in all parents
-            if parents_matches < len(examples):
+            # Ignore this coord it if was found in all parents (except if there was only 1 parent)
+            if parents_matches == len(examples) and len(examples) != 1:
+                continue
+            # Always add a definitive match or private
+            elif parents_matches <= 1:
                 filter_coords.add(coord)
+            # Check if we're showing substitutions found in multiple parents                
+            elif parents_matches > 1 and not args.ignore_shared_subs:
+                filter_coords.add(coord)
+
         coords = filter_coords
 
 
@@ -733,6 +742,7 @@ def show_matches(examples, samples, writer):
     collected_outputs = []
     last_id = ""
 
+
     for sa in my_tqdm(samples, desc=f"Second pass scan for {[ex['name'] for ex in examples]}"):
         #current_color = get_color(color_index)
         #color_by_name[sa['name']] = current_color
@@ -741,6 +751,7 @@ def show_matches(examples, samples, writer):
         breakpoints = 0
         definitives_since_breakpoint = 0
         definitives_count = []
+        unique_subs = []
         regions = []  # for CSV output
         privates = []
         last_coord = None
@@ -761,6 +772,9 @@ def show_matches(examples, samples, writer):
             if args.add_spaces and c % args.add_spaces == 0:
                 output += " "
 
+            # -----------------------------------------------------------------
+            # Missing Data
+
             if is_missing(coord, sa['missings']):
                 output += colored('N', 'white', attrs=['reverse'])
 
@@ -778,9 +792,14 @@ def show_matches(examples, samples, writer):
                     prev_definitive_match = matching_exs[0]
                     definitives_since_breakpoint = 0
 
+            # -----------------------------------------------------------------
+            # Non-Missing Data
+
             else:
                 # -------------------------------------------------------------
-                if sa['subs_dict'].get(coord):  # sample has sub here
+                # Substitution at coordinate
+
+                if sa['subs_dict'].get(coord):
                     for ex in examples:
                         if ex['subs_dict'].get(coord) and ex['subs_dict'].get(coord).mut == sa['subs_dict'][coord].mut:
                             matching_exs.append(ex['name'])
@@ -825,6 +844,8 @@ def show_matches(examples, samples, writer):
 
                     elif len(matching_exs) == 1:
                         # exactly one of the examples match - definite match
+                        unique_subs.append("{}|{}".format(coord,matching_exs[0]))
+                        
                         fg = color_by_name[matching_exs[0]]
                         if matching_exs[0] != prev_definitive_match:
                             if prev_definitive_match:
@@ -853,7 +874,8 @@ def show_matches(examples, samples, writer):
                     output += colored(text, fg, bg, attrs=attrs)
 
                 # -------------------------------------------------------------
-                else:  # sample does not have sub here
+                # Not a Substitution               
+                else:
                     matching_exs = []
                     for ex in examples:
                         if not ex['subs_dict'].get(coord):
@@ -871,6 +893,10 @@ def show_matches(examples, samples, writer):
                     elif len(matching_exs) == 1:
                         # exactly one of the examples match - definite match
                         fg = color_by_name[matching_exs[0]]
+                        # If we haven't found a definitive match yet, this is the start coord
+                        if not prev_definitive_match:
+                            start_coord = coord
+
                         if matching_exs[0] != prev_definitive_match:
                             if prev_definitive_match:
                                 breakpoints += 1
@@ -889,6 +915,11 @@ def show_matches(examples, samples, writer):
                         # more than one, but not all examples match - can't provide proper color
                         #bg = 'on_yellow'
                         attrs = ['underline']
+                        # Output the base, then skip to the next record
+                        # ie. don't save the current coords as a last coord for breakpoints
+                        output += colored(text, fg, bg, attrs=attrs)
+                        continue                        
+
                     else: 
                         #all examples match (which means this is a private mutation in another sample)
                         # Output the base, then skip to the next record
@@ -912,6 +943,7 @@ def show_matches(examples, samples, writer):
 
         reduced = list(filter(lambda ex_count: ex_count[1] > args.max_intermission_length, definitives_count))
         num_intermissions = len(definitives_count) - len(reduced)
+
         further_reduced = []
 
         if len(reduced):
@@ -950,7 +982,8 @@ def show_matches(examples, samples, writer):
                     'examples': examples_str.replace(' ', ''),
                     'intermissions': num_intermissions,
                     'breakpoints': num_breakpoints,
-                    'regions': ','.join([f"{start}:{stop}|{ex.replace(' ', '')}" for start, stop, ex in regions])
+                    'regions': ','.join([f"{start}:{stop}|{ex.replace(' ', '')}" for start, stop, ex in regions]),
+                    "unique_subs" : ",".join(unique_subs).replace(' ', ''),
                 }
                 if args.show_private_mutations:
                     row.update({'privates': ','.join([f"{ps.ref}{ps.coordinate}{ps.mut}" for ps in privates])})
