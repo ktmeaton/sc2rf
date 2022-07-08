@@ -7,11 +7,14 @@ import logging
 import requests
 import sys
 import time
+import copy
 
 NO_DATA_CHAR = "NA"
 LAPIS_URL_BASE = "https://lapis.cov-spectrum.org/open/v1/sample/aggregated?fields=pangoLineage&nucMutations="
 LINEAGE_PROP_THRESHOLD = 0.01
 LAPIS_SLEEP_TIME = 0
+# Consider a breakpoint match if within 50 base pairs
+BREAKPOINT_APPROX_BP = 50
 
 def create_logger(logfile=None):
     # create logger
@@ -27,14 +30,45 @@ def create_logger(logfile=None):
     logger.addHandler(handler)
     return logger
 
+def reverse_iter_collapse(regions, min_len, start_coord, end_coord, clade):
+    """Collapse adjacent regions from the same parent into one region."""
+
+    coord_list = list(regions.keys())
+    coord_list.reverse()
+
+    for coord in coord_list:
+        prev_start_coord = coord
+        prev_end_coord = regions[prev_start_coord]["end"]
+        prev_region_len = (prev_end_coord - prev_start_coord) + 1
+        prev_clade = regions[coord]["clade"]
+
+        # If the previous region was too short AND from a different clade
+        # Delete that previous region, it's an intermission
+        if prev_region_len < min_len and clade != prev_clade:
+            del regions[prev_start_coord]
+
+        # Collapse the current region into the previous one
+        elif clade == prev_clade:
+            regions[prev_start_coord]["end"] = end_coord
+            break
+
+        # Otherwise, clades differ and this is the start of a new region
+        else:
+            regions[start_coord] = {"clade": clade, "end": end_coord}
+            break
+
+    # Check if the reveres iter collapse wound up deleting all the regions
+    if len(regions) == 0:
+        regions[start_coord] = {"clade": clade, "end": end_coord}
+
 @click.command()
 @click.option("--csv", help="CSV output from sc2rf.", required=True)
 @click.option("--ansi", help="ANSI output from sc2rf.", required=False)
 @click.option("--motifs", help="TSV of breakpoint motifs", required=False)
 @click.option("--prefix", help="Prefix for output files.", required=False, default="sc2rf.recombinants")
-@click.option("--min-len", help="Minimum region length.", required=False, default=1000)
+@click.option("--min-len", help="Minimum region length (-1 to disable length filtering).", required=False, default=-1)
 @click.option(
-    "--max-parents", help="Maximum number of parents.", required=False, default=2
+    "--max-parents", help="Maximum number of parents (-1 to disable parent filtering).", required=False, default=-1
 )
 @click.option("--outdir", help="Output directory", required=False, default=".")
 @click.option(
@@ -49,9 +83,9 @@ def create_logger(logfile=None):
 )
 @click.option(
     "--max-breakpoints",
-    help="The maximum number of breakpoints",
+    help="The maximum number of breakpoints (-1 to disable breakpoint filtering)",
     required=False,
-    default=2,
+    default=-1,
 )
 @click.option(
     "--issues", help="Issues TSV metadata from pango-designation (https://github.com/ktmeaton/ncov-recombinant/raw/master/resources/issues.tsv)", required=False
@@ -123,9 +157,6 @@ def main(
         ]
         breakpoint_df[parents_col] = [p.split(",") for p in breakpoint_df[parents_col]]
 
-        # Consider a breakpoint match if within 50 base pairs
-        breakpoint_approx_bp = 50
-
     # (Optional) motifs dataframe
     if motifs:
         logger.info("Parsing motifs: {}".format(motifs))
@@ -162,6 +193,9 @@ def main(
         prev_start_coord = 0
         prev_end_coord = 0
 
+        # ---------------------------------------------------------------------
+        # FIRST PASS
+
         for region in regions_split:
             coords = region.split("|")[0]
             clade = region.split("|")[1]
@@ -170,9 +204,6 @@ def main(
             region_len = (end_coord - start_coord) + 1
             coord_list = list(regions_filter)
             coord_list.reverse()
-
-            # -----------------------------------------------------------------
-            # FIRST PASS
 
             # Just ignore singletons, no calculation necessary
             if region_len == 1:
@@ -184,33 +215,15 @@ def main(
                 prev_clade = clade
                 prev_start_coord = start_coord
 
-            # -----------------------------------------------------------------
-            # SECOND PASS: REVERSE ITER COLLAPSE
-
-            for coord in coord_list:
-                prev_start_coord = coord
-                prev_end_coord = regions_filter[prev_start_coord]["end"]
-                prev_region_len = (prev_end_coord - prev_start_coord) + 1
-                prev_clade = regions_filter[coord]["clade"]
-
-                # If the previous region was too short AND from a different clade
-                # Delete that previous region, it's an intermission
-                if prev_region_len < min_len and clade != prev_clade:
-                    del regions_filter[prev_start_coord]
-
-                # Collapse the current region into the previous one
-                elif clade == prev_clade:
-                    regions_filter[prev_start_coord]["end"] = end_coord
-                    break
-
-                # Otherwise, clades differ and this is the start of a new region
-                else:
-                    regions_filter[start_coord] = {"clade": clade, "end": end_coord}
-                    break
-
-            # Check if the reveres iter collapse wound up deleting all the regions
-            if len(regions_filter) == 0:
-                regions_filter[start_coord] = {"clade": clade, "end": end_coord}
+            # Moving 3' to 5', collapse adjacent regions from the same parent
+            # Modifies regions in place
+            reverse_iter_collapse(
+                regions=regions_filter, 
+                min_len=min_len, 
+                start_coord=start_coord,
+                end_coord=end_coord,
+                clade=clade,
+                )
 
             # These get updated regardless of condition
             prev_clade = clade
@@ -225,13 +238,13 @@ def main(
                 del regions_filter[start_coord]
 
         # -----------------------------------------------------------------
-        # THIRD PASS: UNIQUE SUBSTITUTIONS
+        # SECOND PASS: UNIQUE SUBSTITUTIONS
+
+        regions_filter_collapse = {}
   
-        # Check that all regions have a unique sub
-        regions_filter_unique_subs = {}
-        for start_coord in regions_filter:
+        for start_coord in list(regions_filter):
             clade = regions_filter[start_coord]["clade"]
-            end_coord = regions_filter[start_coord]["end"]     
+            end_coord = regions_filter[start_coord]["end"]
 
             region_contains_unique_sub = False
 
@@ -247,10 +260,18 @@ def main(
                     region_contains_unique_sub = True
                     unique_subs_filter.append(sub)
 
-            if region_contains_unique_sub: 
-                regions_filter_unique_subs[start_coord] = regions_filter[start_coord]
+            # If it contains a unique sub, check if we should
+            # collapse into previous parental region
+            if region_contains_unique_sub:
+                reverse_iter_collapse(
+                    regions=regions_filter_collapse, 
+                    min_len=min_len, 
+                    start_coord=start_coord,
+                    end_coord=end_coord,
+                    clade=clade,
+                )
 
-        regions_filter = regions_filter_unique_subs
+        regions_filter = regions_filter_collapse
 
         # Check if all the regions were collapsed
         if len(regions_filter) < 2:
@@ -282,11 +303,12 @@ def main(
         num_breakpoints_filter = len(breakpoints_filter)
 
         # Check for too many breakpoints
-        if num_breakpoints_filter > max_breakpoints:
-            false_positives[strain] = "{} breakpoints > {} max breakpoints".format(
-                num_breakpoints_filter,
-                max_breakpoints,
-            )
+        if max_breakpoints != -1:
+            if num_breakpoints_filter > max_breakpoints:
+                false_positives[strain] = "{} breakpoints > {} max breakpoints".format(
+                    num_breakpoints_filter,
+                    max_breakpoints,
+                )
 
         # Check if postprocessing increased the number of breakpoints
         # Why is this bad again? Should be fine as long as we're under the max?
@@ -301,8 +323,9 @@ def main(
         clades_filter = [regions_filter[s]["clade"] for s in regions_filter]
         #clades_filter_csv = ",".join(clades_filter)
         num_parents = len(set(clades_filter))
-        if num_parents > max_parents:
-            false_positives[strain] = "{} parents > {}".format(num_parents, max_parents)
+        if max_parents != -1:
+            if num_parents > max_parents:
+                false_positives[strain] = "{} parents > {}".format(num_parents, max_parents)
 
         # Extract the lengths of each region
         regions_length = [str(regions_filter[s]["end"] - s) for s in regions_filter]
@@ -340,8 +363,8 @@ def main(
                         end_diff = abs(end_s - end_i)
 
                         if (
-                            start_diff <= breakpoint_approx_bp
-                            and end_diff <= breakpoint_approx_bp
+                            start_diff <= BREAKPOINT_APPROX_BP
+                            and end_diff <= BREAKPOINT_APPROX_BP
                         ):
 
                             sc2rf_lineages[bp_s].append(bp_rec[1]["lineage"])
@@ -393,8 +416,8 @@ def main(
                 bp_end = int(bp.split(":")[1])
 
                 # Add buffers
-                bp_start = bp_start - breakpoint_approx_bp
-                bp_end = bp_end + breakpoint_approx_bp
+                bp_start = bp_start - BREAKPOINT_APPROX_BP
+                bp_end = bp_end + BREAKPOINT_APPROX_BP
 
                 for motif_rec in motifs_df.iterrows():
                     motif_start = motif_rec[1]["start"]
@@ -432,7 +455,7 @@ def main(
         if strain in false_positives:
             df.at[strain, "sc2rf_status"]  = "false_positive"
             df.at[strain, "sc2rf_details"] = false_positives[strain]
-            df.at[strain, "sc2rf_breakpoints_filter"]  = NO_DATA_CHAR
+            #df.at[strain, "sc2rf_breakpoints_filter"]  = NO_DATA_CHAR
         else:
             df.at[strain, "sc2rf_status"]  = "positive"
 
