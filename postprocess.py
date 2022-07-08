@@ -175,19 +175,22 @@ def main(
     # (Optional) Merge in secondary dataframe
     if csv_secondary:
         logger.info("Parsing secondary csv: {}".format(csv_secondary))
-        df_secondary = pd.read_csv(csv_secondary, sep=",", index_col=0)
-        
+        try:
+            df_secondary = pd.read_csv(csv_secondary, sep=",", index_col=0)
+            # Identify secondary strains missing in primary
+            missing_strains = []
+            for strain in df_secondary.index:
+                if strain not in df.index:
+                    missing_strains.append(strain)
+            
+            df_missing = df_secondary[df_secondary.index.isin(missing_strains)]
+            
+            df = pd.concat([df,df_missing])
+            df.fillna(NO_DATA_CHAR, inplace=True)
 
-        # Identify secondary strains missing in primary
-        missing_strains = []
-        for strain in df_secondary.index:
-            if strain not in df.index:
-                missing_strains.append(strain)
-        
-        df_missing = df_secondary[df_secondary.index.isin(missing_strains)]
-        
-        df = pd.concat([df,df_missing])
-        df.fillna(NO_DATA_CHAR, inplace=True)
+        except pd.errors.EmptyDataError:
+            logger.warning("No records in secondary csv") 
+
 
     # Initialize a dictionary of false_positive strains
     # key: strain, value: reason
