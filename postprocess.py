@@ -64,6 +64,8 @@ def reverse_iter_collapse(regions, min_len, start_coord, end_coord, clade):
 @click.command()
 @click.option("--csv", help="CSV output from sc2rf.", required=True)
 @click.option("--ansi", help="ANSI output from sc2rf.", required=False)
+@click.option("--csv-secondary", help="Secondary CSV output from sc2rf.", required=False)
+#@click.option("--ansi-secondary", help="Secondary ANSI output from sc2rf.", required=False)
 @click.option("--motifs", help="TSV of breakpoint motifs", required=False)
 @click.option("--prefix", help="Prefix for output files.", required=False, default="sc2rf.recombinants")
 @click.option("--min-len", help="Minimum region length (-1 to disable length filtering).", required=False, default=-1)
@@ -93,7 +95,9 @@ def reverse_iter_collapse(regions, min_len, start_coord, end_coord, clade):
 @click.option("--log", help="Path to a log file", required=False)
 def main(
     csv,
+    csv_secondary,
     ansi,
+    #ansi_secondary,
     prefix,
     min_len,
     outdir,
@@ -118,7 +122,7 @@ def main(
     # Import Dataframe
 
     # sc2rf output (required)
-    logger.info("Reading input data: {}".format(csv))
+    logger.info("Parsing csv: {}".format(csv))
 
     df = pd.read_csv(csv, sep=",", index_col=0)
     df.fillna("", inplace=True)
@@ -167,6 +171,23 @@ def main(
         logger.info("Parsing nextclade: {}".format(nextclade))
         nextclade_df = pd.read_csv(nextclade, sep="\t", index_col=0)
         nextclade_df.fillna(NO_DATA_CHAR, inplace=True)
+
+    # (Optional) Merge in secondary dataframe
+    if csv_secondary:
+        logger.info("Parsing secondary csv: {}".format(csv_secondary))
+        df_secondary = pd.read_csv(csv_secondary, sep=",", index_col=0)
+        
+
+        # Identify secondary strains missing in primary
+        missing_strains = []
+        for strain in df_secondary.index:
+            if strain not in df.index:
+                missing_strains.append(strain)
+        
+        df_missing = df_secondary[df_secondary.index.isin(missing_strains)]
+        
+        df = pd.concat([df,df_missing])
+        df.fillna(NO_DATA_CHAR, inplace=True)
 
     # Initialize a dictionary of false_positive strains
     # key: strain, value: reason
@@ -664,7 +685,7 @@ def main(
     if ansi:
         
         outpath_ansi = os.path.join(outdir, prefix + ".ansi.txt")
-        logger.info("Writing filtered ansi input: {}".format(outpath_ansi))        
+        logger.info("Writing filtered ansi: {}".format(outpath_ansi))        
         if len(false_positives) > 0:
             cmd = "cut -f 1 {exclude} | grep -v -f - {inpath} > {outpath}".format(
                 exclude=outpath_exclude,
@@ -676,7 +697,7 @@ def main(
                 inpath=ansi,
                 outpath=outpath_ansi,
             )
-        os.system(cmd)
+        os.system(cmd)    
 
     # -------------------------------------------------------------------------
     # write alignment
