@@ -756,6 +756,7 @@ def show_matches(examples, samples, writer):
         privates = []
         last_coord = None
 
+
         if len(ordered_coords) == 0:
             continue
         else:
@@ -765,6 +766,7 @@ def show_matches(examples, samples, writer):
         output = ''
 
         output += fixed_len(sa['name'], ml) + ' '
+
         for c, coord in enumerate(ordered_coords):
 
             matching_exs = []
@@ -773,37 +775,43 @@ def show_matches(examples, samples, writer):
                 output += " "
 
             # -----------------------------------------------------------------
-            # Missing Data
+            # OPTION 1: MISSING DATA
 
             if is_missing(coord, sa['missings']):
+                # TBD: Is this always going to be an N?
                 output += colored('N', 'white', attrs=['reverse'])
 
-                # Treat as breakpoint, Note: requires post-filtering!
+                # Did we find a matching example in the previous region?
                 if prev_definitive_match:
+
+                    # If we have recently seen a definitive, add to the counts
+                    if definitives_since_breakpoint:
+                        definitives_count.append((prev_definitive_match, definitives_since_breakpoint))
+
+                    # Since we don't know the parent of missing, treat as a breakpoint
                     breakpoints += 1
                     regions.append((start_coord, last_coord, prev_definitive_match))
-                    start_coord = coord  # start of a new region
-
-                if definitives_since_breakpoint:
-                    definitives_count.append((prev_definitive_match, definitives_since_breakpoint))
-
-                # Have we found any matching examples so far?
-                if len(matching_exs) > 0:
-                    prev_definitive_match = matching_exs[0]
+                    # Reset the previous match
+                    prev_definitive_match = None
+                    # Reset definitives count
                     definitives_since_breakpoint = 0
 
             # -----------------------------------------------------------------
-            # Non-Missing Data
+            # OPTION 2: NON-MISSING DATA
 
             else:
+
                 # -------------------------------------------------------------
-                # Substitution at coordinate
+                # OPTION 2a: Substitution
 
                 if sa['subs_dict'].get(coord):
+
+                    # Search for an example that matches this substitution
                     for ex in examples:
                         if ex['subs_dict'].get(coord) and ex['subs_dict'].get(coord).mut == sa['subs_dict'][coord].mut:
                             matching_exs.append(ex['name'])
 
+                    # Initialize the formatting of the output base
                     text = sa['subs_dict'][coord].mut
                     fg = 'white'
                     bg = None
@@ -829,12 +837,13 @@ def show_matches(examples, samples, writer):
                         if prev_terminal_deletion or proc_terminal_deletion:
                             text = "N"
 
+                    # Check if this is an N
                     if text == "N":
                         fg = "white"
                         attrs = ["reverse"]
 
+                    # none of the examples match - private mutation
                     elif len(matching_exs) == 0:
-                        # none of the examples match - private mutation
                         bg = 'on_cyan'
                         privates.append(sa['subs_dict'].get(coord))
                         # Output the base, then skip to the next record
@@ -842,32 +851,42 @@ def show_matches(examples, samples, writer):
                         output += colored(text, fg, bg, attrs=attrs)
                         continue
 
+                    # exactly one of the examples match - definite match
                     elif len(matching_exs) == 1:
-                        # exactly one of the examples match - definite match
                         unique_subs.append("{}|{}".format(coord,matching_exs[0]))
                         
                         fg = color_by_name[matching_exs[0]]
-                        if matching_exs[0] != prev_definitive_match:
-                            if prev_definitive_match:
-                                breakpoints += 1
-                                regions.append((start_coord, last_coord, prev_definitive_match))
-                                start_coord = coord  # start of a new region
 
+                        # If the previous region matched a different example, this is the start of a new parental region
+                        if matching_exs[0] != prev_definitive_match:
+
+                            if prev_definitive_match:
+                                # record the previous parental region
+                                regions.append((start_coord, last_coord, prev_definitive_match))
+                                # record a breakpoint
+                                breakpoints += 1
+
+                            # Record definitive substitutions observed in the previous region
                             if definitives_since_breakpoint:
                                 definitives_count.append((prev_definitive_match, definitives_since_breakpoint))
 
+                            # The current coordinate begins the new region
+                            start_coord = coord
+                            # The current example is the new parent
                             prev_definitive_match = matching_exs[0]
+                            # Reset the definitives count to 0
                             definitives_since_breakpoint = 0
 
-                        definitives_since_breakpoint += 1
+                        # Increment the counter of definitives
+                        definitives_since_breakpoint += 1                       
 
+                    # more than one, but not all examples match - can't provide proper color
                     elif len(matching_exs) < len(examples):
-                        # more than one, but not all examples match - can't provide proper color
                         #bg = 'on_blue'
                         attrs = ['bold', 'underline']
 
+                    # all examples match
                     else:
-                        # all examples match
                         if args.ignore_shared_subs:
                             continue
 
@@ -876,6 +895,8 @@ def show_matches(examples, samples, writer):
                 # -------------------------------------------------------------
                 # Not a Substitution               
                 else:
+
+                    # Find examples that have the reference allele
                     matching_exs = []
                     for ex in examples:
                         if not ex['subs_dict'].get(coord):
@@ -886,8 +907,8 @@ def show_matches(examples, samples, writer):
                     bg = None
                     attrs = []
 
+                    # Option 1: none of the examples match - private reverse mutation
                     if len(matching_exs) == 0:
-                        # none of the examples match - private reverse mutation
                         bg = 'on_magenta'
 
                     elif len(matching_exs) == 1:
@@ -933,8 +954,9 @@ def show_matches(examples, samples, writer):
 
         # Finish iterating through all coords for a sample
 
-        # output last region
-        regions.append((start_coord, last_coord, prev_definitive_match))
+        # output last region, if it wasn't missing
+        if prev_definitive_match:
+            regions.append((start_coord, last_coord, prev_definitive_match))
 
         if definitives_since_breakpoint:
             definitives_count.append((prev_definitive_match, definitives_since_breakpoint))
