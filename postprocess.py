@@ -479,7 +479,7 @@ def main(
         if strain in false_positives:
             df.at[strain, "sc2rf_status"]  = "false_positive"
             df.at[strain, "sc2rf_details"] = false_positives[strain]
-            #df.at[strain, "sc2rf_breakpoints_filter"]  = NO_DATA_CHAR
+            df.at[strain, "sc2rf_breakpoints_filter"]  = NO_DATA_CHAR
         else:
             df.at[strain, "sc2rf_status"]  = "positive"
 
