@@ -493,6 +493,7 @@ def main(
             df.at[strain, "sc2rf_breakpoints_filter"]  = NO_DATA_CHAR
         else:
             df.at[strain, "sc2rf_status"]  = "positive"
+            df.at[strain, "sc2rf_details"] = "recombination detected"
 
     # ---------------------------------------------------------------------
     # Identify parent lineages by querying cov-spectrum mutations
