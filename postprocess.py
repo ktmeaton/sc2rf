@@ -177,15 +177,26 @@ def main(
         logger.info("Parsing secondary csv: {}".format(csv_secondary))
         try:
             df_secondary = pd.read_csv(csv_secondary, sep=",", index_col=0)
-            # Identify secondary strains missing in primary
-            missing_strains = []
+
+            # Option 1. Identify secondary strains missing in primary
+            #missing_strains = []
+            #for strain in df_secondary.index:
+            #    if strain not in df.index:
+            #        missing_strains.append(strain)
+            #df_missing = df_secondary[df_secondary.index.isin(missing_strains)]
+            #df = pd.concat([df,df_missing])
+            #df.fillna(NO_DATA_CHAR, inplace=True)
+
+            # Option 2. Identify strains in primary to override with secondary
+            override_strains = []
             for strain in df_secondary.index:
-                if strain not in df.index:
-                    missing_strains.append(strain)
-            
-            df_missing = df_secondary[df_secondary.index.isin(missing_strains)]
-            
-            df = pd.concat([df,df_missing])
+               if strain in df.index:
+                   override_strains.append(strain)
+
+            # Remove the override strains from the primary dataframe
+            df = df[~df.index.isin(override_strains)]
+            # Combine primary and secondary data frames
+            df = pd.concat([df,df_secondary])
             df.fillna(NO_DATA_CHAR, inplace=True)
 
         except pd.errors.EmptyDataError:
