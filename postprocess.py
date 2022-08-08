@@ -62,10 +62,10 @@ def reverse_iter_collapse(regions, min_len, start_coord, end_coord, clade):
         regions[start_coord] = {"clade": clade, "end": end_coord}
 
 @click.command()
-@click.option("--csv", help="CSV output from sc2rf.", required=True)
-@click.option("--ansi", help="ANSI output from sc2rf.", required=False)
+@click.option("--csv-primary", help="CSV output from sc2rf.", required=True)
+@click.option("--ansi-primary", help="ANSI output from sc2rf.", required=False)
 @click.option("--csv-secondary", help="Secondary CSV output from sc2rf.", required=False)
-#@click.option("--ansi-secondary", help="Secondary ANSI output from sc2rf.", required=False)
+@click.option("--ansi-secondary", help="Secondary ANSI output from sc2rf.", required=False)
 @click.option("--motifs", help="TSV of breakpoint motifs", required=False)
 @click.option("--prefix", help="Prefix for output files.", required=False, default="sc2rf.recombinants")
 @click.option("--min-len", help="Minimum region length (-1 to disable length filtering).", required=False, default=-1)
@@ -94,10 +94,10 @@ def reverse_iter_collapse(regions, min_len, start_coord, end_coord, clade):
 )
 @click.option("--log", help="Path to a log file", required=False)
 def main(
-    csv,
+    csv_primary,
     csv_secondary,
-    ansi,
-    #ansi_secondary,
+    ansi_primary,
+    ansi_secondary,
     prefix,
     min_len,
     outdir,
@@ -122,9 +122,9 @@ def main(
     # Import Dataframe
 
     # sc2rf output (required)
-    logger.info("Parsing csv: {}".format(csv))
+    logger.info("Parsing csv: {}".format(csv_primary))
 
-    df = pd.read_csv(csv, sep=",", index_col=0)
+    df = pd.read_csv(csv_primary, sep=",", index_col=0)
     df.fillna("", inplace=True)
 
     # Initialize dataframe columns to NA
@@ -207,7 +207,7 @@ def main(
     # key: strain, value: reason
     false_positives = {}
 
-    logger.info("Post-processing table: {}".format(csv))
+    logger.info("Post-processing table")
 
     for rec in df.iterrows():
 
@@ -697,22 +697,39 @@ def main(
 
     # -------------------------------------------------------------------------
     # filter the ansi output
-    if ansi:
+    if ansi_primary:
         
-        outpath_ansi = os.path.join(outdir, prefix + ".ansi.txt")
+        outpath_ansi = os.path.join(outdir, prefix + ".ansi.primary.txt")
         logger.info("Writing filtered ansi: {}".format(outpath_ansi))        
         if len(false_positives) > 0:
             cmd = "cut -f 1 {exclude} | grep -v -f - {inpath} > {outpath}".format(
                 exclude=outpath_exclude,
-                inpath=ansi,
+                inpath=ansi_primary,
                 outpath=outpath_ansi,
             )
         else:
             cmd = "cp -f {inpath} {outpath}".format(
-                inpath=ansi,
+                inpath=ansi_primary,
                 outpath=outpath_ansi,
             )
         os.system(cmd)    
+
+    if ansi_secondary:
+        
+        outpath_ansi = os.path.join(outdir, prefix + ".ansi.secondary.txt")
+        logger.info("Writing filtered ansi: {}".format(outpath_ansi))        
+        if len(false_positives) > 0:
+            cmd = "cut -f 1 {exclude} | grep -v -f - {inpath} > {outpath}".format(
+                exclude=outpath_exclude,
+                inpath=ansi_secondary,
+                outpath=outpath_ansi,
+            )
+        else:
+            cmd = "cp -f {inpath} {outpath}".format(
+                inpath=ansi_secondary,
+                outpath=outpath_ansi,
+            )
+        os.system(cmd)         
 
     # -------------------------------------------------------------------------
     # write alignment
