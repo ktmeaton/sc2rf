@@ -30,7 +30,7 @@ def create_logger(logfile=None):
     logger.addHandler(handler)
     return logger
 
-def reverse_iter_collapse(regions, min_len, start_coord, end_coord, clade):
+def reverse_iter_collapse(regions, min_len, max_breakpoint_len, start_coord, end_coord, clade):
     """Collapse adjacent regions from the same parent into one region."""
 
     coord_list = list(regions.keys())
@@ -41,11 +41,21 @@ def reverse_iter_collapse(regions, min_len, start_coord, end_coord, clade):
         prev_end_coord = regions[prev_start_coord]["end"]
         prev_region_len = (prev_end_coord - prev_start_coord) + 1
         prev_clade = regions[coord]["clade"]
+        breakpoint_len = start_coord - prev_end_coord
 
         # If the previous region was too short AND from a different clade
         # Delete that previous region, it's an intermission
         if prev_region_len < min_len and clade != prev_clade:
             del regions[prev_start_coord]
+
+        # If the previous breakpoint was too long AND from a different clade
+        # Don't add the current region
+        elif (
+            start_coord != prev_start_coord
+            and breakpoint_len > max_breakpoint_len
+            and clade != prev_clade
+        ):
+            break
 
         # Collapse the current region into the previous one
         elif clade == prev_clade:
@@ -69,6 +79,7 @@ def reverse_iter_collapse(regions, min_len, start_coord, end_coord, clade):
 @click.option("--motifs", help="TSV of breakpoint motifs", required=False)
 @click.option("--prefix", help="Prefix for output files.", required=False, default="sc2rf.recombinants")
 @click.option("--min-len", help="Minimum region length (-1 to disable length filtering).", required=False, default=-1)
+@click.option("--max-breakpoint-len", help="Maximum breakpoint length (-1 to disable length filtering).", required=False, default=-1)
 @click.option(
     "--max-parents", help="Maximum number of parents (-1 to disable parent filtering).", required=False, default=-1
 )
@@ -100,6 +111,7 @@ def main(
     ansi_secondary,
     prefix,
     min_len,
+    max_breakpoint_len,
     outdir,
     aligned,
     nextclade,
@@ -255,6 +267,7 @@ def main(
             reverse_iter_collapse(
                 regions=regions_filter, 
                 min_len=min_len, 
+                max_breakpoint_len=max_breakpoint_len,
                 start_coord=start_coord,
                 end_coord=end_coord,
                 clade=clade,
@@ -301,6 +314,7 @@ def main(
                 reverse_iter_collapse(
                     regions=regions_filter_collapse, 
                     min_len=min_len, 
+                    max_breakpoint_len=max_breakpoint_len,
                     start_coord=start_coord,
                     end_coord=end_coord,
                     clade=clade,
